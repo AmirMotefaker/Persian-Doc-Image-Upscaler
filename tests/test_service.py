@@ -13,11 +13,12 @@ def test_process_image_grayscale_file_end_to_end(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         service,
-        "recognize",
-        lambda image: OCRResult(
+        "recognize_best",
+        lambda candidates: OCRResult(
             text="متن آزمایشی فارسی",
             average_confidence=0.98,
             lines=(("متن آزمایشی فارسی", 0.98),),
+            pass_name="adaptive",
         ),
     )
 
@@ -32,4 +33,5 @@ def test_process_image_grayscale_file_end_to_end(tmp_path, monkeypatch):
     assert Path(ocr_preview).is_file()
     assert Path(text_file).read_text(encoding="utf-8") == "متن آزمایشی فارسی"
     assert "98.00%" in summary
+    assert "adaptive" in summary
     assert "متن آزمایشی فارسی" in summary
