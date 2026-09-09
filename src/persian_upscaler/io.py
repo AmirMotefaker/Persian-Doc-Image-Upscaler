@@ -1,11 +1,8 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
-
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 MAX_PIXELS = 40_000_000
