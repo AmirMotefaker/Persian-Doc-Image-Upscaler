@@ -34,7 +34,7 @@ CSS = """
 .rtl {direction:rtl; text-align:right;}
 """
 
-with gr.Blocks(title="بهبود تصویر و OCR فارسی", css=CSS) as demo:
+with gr.Blocks(title="بهبود تصویر و OCR فارسی") as demo:
     gr.HTML(
         "<div class='hero'><h1>بهبود کیفیت تصویر و OCR فارسی</h1>"
         "<p>برای اسناد و تصاویر دارای متن فارسی؛ با حفظ مسیر بصری جدا از تصویر بهینه‌شده برای OCR.</p></div>"
@@ -63,7 +63,7 @@ with gr.Blocks(title="بهبود تصویر و OCR فارسی", css=CSS) as demo
                 with gr.Tab("تصویر OCR"):
                     ocr_preview = gr.Image(type="filepath", label="پیش‌پردازش مخصوص OCR")
                 with gr.Tab("متن فارسی"):
-                    output_text = gr.Textbox(lines=16, label="OCR", show_copy_button=True, rtl=True)
+                    output_text = gr.Textbox(lines=16, label="OCR", elem_classes=["rtl"])
                     text_file = gr.File(label="فایل TXT خروجی")
 
     submit.click(
@@ -73,4 +73,4 @@ with gr.Blocks(title="بهبود تصویر و OCR فارسی", css=CSS) as demo
     )
 
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=2).launch()
+    demo.queue(default_concurrency_limit=2).launch(css=CSS)
