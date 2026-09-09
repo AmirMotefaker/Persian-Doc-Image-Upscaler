@@ -9,11 +9,13 @@ from .io import load_image, save_png
 from .ocr import recognize
 
 
-def _stage(name: str, fn):
+def _stage(name_fa: str, name_en: str, language: str, fn):
     try:
         return fn()
     except Exception as exc:
-        raise RuntimeError(f"مرحله «{name}» ناموفق بود: {exc}") from exc
+        if language == "en":
+            raise RuntimeError(f"{name_en} failed: {exc}") from exc
+        raise RuntimeError(f"مرحله «{name_fa}» ناموفق بود: {exc}") from exc
 
 
 def process_image(
@@ -22,24 +24,37 @@ def process_image(
     scale: float = 2.0,
     language: str = "fa",
 ) -> tuple[str, str, str, str]:
-    image = _stage("بارگذاری تصویر", lambda: load_image(file_path))
+    image = _stage("بارگذاری تصویر", "Image loading", language, lambda: load_image(file_path))
     restored = _stage(
         "بهبود کیفیت",
+        "Image enhancement",
+        language,
         lambda: restore_visual(image, profile=profile, scale=scale),
     )
     ocr_input = _stage(
         "آماده‌سازی OCR",
+        "OCR preprocessing",
+        language,
         lambda: prepare_for_ocr(restored, profile=profile),
     )
-    result = _stage("تشخیص متن فارسی", lambda: recognize(ocr_input))
+    result = _stage(
+        "تشخیص متن فارسی",
+        "Persian text recognition",
+        language,
+        lambda: recognize(ocr_input),
+    )
 
     workdir = Path(tempfile.mkdtemp(prefix="persian-upscaler-"))
     restored_path = _stage(
         "ذخیره تصویر بهبودیافته",
+        "Saving enhanced image",
+        language,
         lambda: save_png(workdir / "enhanced.png", restored),
     )
     ocr_preview_path = _stage(
         "ذخیره نمای OCR",
+        "Saving OCR preview",
+        language,
         lambda: save_png(workdir / "ocr-preprocessed.png", ocr_input),
     )
     text_path = workdir / "ocr.txt"
