@@ -73,7 +73,10 @@ def prepare_for_ocr(restored: np.ndarray, profile: str = "طبیعی") -> np.nda
     )
 
 
-def build_ocr_candidates(restored: np.ndarray, profile: str = "طبیعی") -> list[tuple[str, np.ndarray]]:
+def build_ocr_candidates(
+    restored: np.ndarray,
+    profile: str = "طبیعی",
+) -> list[tuple[str, np.ndarray]]:
     """Generate complementary OCR views and let the recognizer choose the strongest result."""
     restored = _ensure_bgr(restored)
     gray = cv2.cvtColor(restored, cv2.COLOR_BGR2GRAY)
