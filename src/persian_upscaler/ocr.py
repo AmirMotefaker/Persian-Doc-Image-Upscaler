@@ -107,10 +107,9 @@ def _ordered_indices(payload: dict[str, Any], count: int) -> list[int]:
 @lru_cache(maxsize=2)
 def get_ocr(device: str = "cpu") -> PaddleOCR:
     return PaddleOCR(
-        lang="fa",
-        ocr_version="PP-OCRv5",
         device=device,
         text_detection_model_name="PP-OCRv5_mobile_det",
+        text_recognition_model_name="arabic_PP-OCRv5_mobile_rec",
         enable_mkldnn=False,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
