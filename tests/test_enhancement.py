@@ -16,3 +16,21 @@ def test_ocr_preprocessing_is_separate_grayscale_image():
     ocr_image = prepare_for_ocr(restored, profile="سند")
     assert ocr_image.ndim == 2
     assert restored.ndim == 3
+
+
+def test_restore_visual_accepts_grayscale_input():
+    image = np.full((40, 80), 220, dtype=np.uint8)
+    output = restore_visual(image, profile="سند", scale=1.0)
+    assert output.shape == (40, 80, 3)
+
+
+def test_restore_visual_accepts_single_channel_input():
+    image = np.full((40, 80, 1), 220, dtype=np.uint8)
+    output = restore_visual(image, profile="سند", scale=1.0)
+    assert output.shape == (40, 80, 3)
+
+
+def test_restore_visual_accepts_alpha_input():
+    image = np.full((40, 80, 4), 220, dtype=np.uint8)
+    output = restore_visual(image, profile="سند", scale=1.0)
+    assert output.shape == (40, 80, 3)
