@@ -137,6 +137,24 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+def _draw_right_aligned(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    *,
+    fill: int,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> None:
+    """Draw text without requiring libraqm; preserves app startup on minimal Pillow builds."""
+    x, y = xy
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        width = bbox[2] - bbox[0]
+    except (AttributeError, TypeError):
+        width = int(draw.textlength(text, font=font))
+    draw.text((max(40, x - width), y), text, fill=fill, font=font)
+
+
 def _make_scan_sample() -> str:
     workdir = Path(tempfile.mkdtemp(prefix="daqiqkhan-sample-"))
     path = workdir / "persian-scan-sample.png"
@@ -157,20 +175,25 @@ def _make_scan_sample() -> str:
     y = 85
     for index, line in enumerate(lines):
         font = title_font if index == 0 else text_font
-        try:
-            draw.text((1080, y), line, fill=28, font=font, anchor="ra", direction="rtl")
-        except (TypeError, ValueError):
-            draw.text((80, y), line, fill=28, font=font)
+        _draw_right_aligned(draw, (1080, y), line, fill=28, font=font)
         y += 92 if index == 0 else 78
 
     draw.rectangle((65, 610, 1115, 700), outline=105, width=2)
-    try:
-        draw.text((1080, 642), "یادداشت: خروجی باید خوانا، مرتب و قابل کپی باشد.", fill=55, font=small_font, anchor="ra", direction="rtl")
-    except (TypeError, ValueError):
-        draw.text((90, 642), "Persian OCR sample document", fill=55, font=small_font)
+    _draw_right_aligned(
+        draw,
+        (1080, 642),
+        "یادداشت: خروجی باید خوانا، مرتب و قابل کپی باشد.",
+        fill=55,
+        font=small_font,
+    )
 
     canvas = canvas.filter(ImageFilter.GaussianBlur(radius=0.55))
-    canvas = canvas.rotate(0.35, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=245)
+    canvas = canvas.rotate(
+        0.35,
+        resample=Image.Resampling.BICUBIC,
+        expand=False,
+        fillcolor=245,
+    )
     canvas.save(path, format="PNG", optimize=True)
     return str(path)
 
@@ -277,29 +300,29 @@ footer, .footer, .built-with {display:none !important;}
 #preview-card {display:flex !important; flex-direction:column !important; gap:7px !important;}
 #compare {flex:1 1 65% !important; min-height:0 !important; height:auto !important;}
 #compare > div {height:100% !important; min-height:0 !important;}
-#result-row {flex:0 0 27% !important; min-height:0 !important; gap:7px !important; margin:0 !important;}
-#ocr-preview {height:100% !important; min-height:0 !important;}
-#ocr-preview > div {height:100% !important;}
-#ocr-text {height:100% !important; min-height:0 !important;}
-#ocr-text textarea {height:calc(100% - 29px) !important; min-height:0 !important; resize:none !important;}
-#downloads {flex:0 0 46px !important; min-height:0 !important; gap:7px !important; margin:0 !important;}
-#downloads > div {min-height:40px !important;}
-#controls-card {display:flex !important; flex-direction:column !important; gap:5px !important;}
-#mode {margin:0 !important;}
-#input-preview {height:155px !important; min-height:155px !important; max-height:155px !important; border:1px dashed rgba(167,139,250,.38) !important; border-radius:14px !important; overflow:hidden !important;}
+#result-row {flex:0 0 28% !important; min-height:0 !important; gap:7px !important; margin:0 !important;}
+#ocr-preview, #ocr-text {height:100% !important; min-height:0 !important;}
+#ocr-preview > div {height:100% !important; min-height:0 !important;}
+#ocr-text textarea {height:calc(100% - 30px) !important; min-height:90px !important; resize:none !important;}
+#downloads {flex:0 0 42px !important; min-height:42px !important; margin:0 !important; gap:7px !important;}
+#downloads > div {min-height:38px !important; max-height:42px !important; overflow:hidden !important;}
+#controls-card {display:flex !important; flex-direction:column !important; gap:6px !important;}
+#input-preview {flex:0 0 30% !important; min-height:140px !important; max-height:220px !important; border:1px dashed rgba(167,139,250,.38) !important; border-radius:14px !important; overflow:hidden !important;}
+#input-preview > div {height:100% !important; min-height:0 !important;}
 #input-preview img {object-fit:contain !important;}
-#sample-button button {height:32px !important; min-height:32px !important; font-size:.7rem !important; border-radius:9px !important;}
-#batch-upload {height:145px !important; min-height:145px !important; max-height:145px !important; overflow:hidden !important;}
-#profile, #format, #scale {margin:0 !important;}
-#single-action button, #batch-action button {min-height:42px !important; height:42px !important; border-radius:11px !important; font-weight:800 !important; font-size:.82rem !important; background:linear-gradient(90deg,#7c3aed,#db2777) !important; border:none !important;}
-.badges {display:flex; justify-content:center; gap:12px; flex-wrap:wrap; padding-top:3px; font-size:.63rem; opacity:.56;}
-@media(max-width:980px){html,body{overflow:auto !important}.gradio-container{height:auto !important;overflow:visible !important;padding:9px !important}#workspace{height:auto !important;flex-wrap:wrap !important}#preview-card,#controls-card{flex:1 1 100% !important;max-width:100% !important;min-width:0 !important;height:auto !important;overflow:visible !important}.card{height:auto !important;overflow:visible !important}#compare{height:390px !important}#result-row{height:260px !important}#input-preview{height:220px !important;max-height:220px !important}}
+#sample-button button {height:34px !important; min-height:34px !important; border-radius:10px !important; font-size:.72rem !important;}
+#mode, #profile, #format {margin:0 !important;}
+#single-action button, #batch-action button {height:42px !important; min-height:42px !important; border-radius:11px !important; font-weight:800 !important; background:linear-gradient(90deg,#7c3aed,#db2777) !important; border:none !important;}
+.badges {display:flex; justify-content:center; gap:12px; flex-wrap:wrap; padding-top:2px; font-size:.64rem; opacity:.58;}
+#batch-report textarea {max-height:155px !important;}
+@media(max-width:980px){html,body{overflow:auto !important}.gradio-container{height:auto !important;min-height:100dvh !important;overflow:visible !important;padding:10px !important}#workspace{height:auto !important;flex-wrap:wrap !important}#preview-card,#controls-card{flex:1 1 100% !important;max-width:100% !important;min-width:0 !important;height:auto !important;overflow:visible !important}.card{height:auto !important;overflow:visible !important}#compare{height:380px !important}#result-row{min-height:260px !important}}
 """
 
 THEME_JS = """
 () => {
-  const light = document.body.dataset.theme !== 'light';
-  document.body.dataset.theme = light ? 'light' : 'dark';
+  const root = document.documentElement;
+  const light = root.dataset.theme !== 'light';
+  root.dataset.theme = light ? 'light' : 'dark';
   document.body.style.background = light ? '#f3f5fa' : '#0b1020';
 }
 """
@@ -309,7 +332,7 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
     hero = gr.HTML(_hero("fa"))
 
     with gr.Row(elem_id="utility-row"):
-        language = gr.Radio([("فارسی", "fa"), ("English", "en")], value="fa", label=None, scale=5)
+        language = gr.Radio([("فارسی", "fa"), ("English", "en")], value="fa", label=None, scale=3)
         theme = gr.Button("☼", scale=1)
 
     with gr.Row(elem_id="workspace"):
@@ -351,7 +374,10 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                     label=COPY["fa"]["upload"],
                     elem_id="input-preview",
                 )
-                sample_button = gr.Button(COPY["fa"]["sample"], elem_id="sample-button")
+                sample_button = gr.Button(
+                    COPY["fa"]["sample"],
+                    elem_id="sample-button",
+                )
 
             with gr.Column(visible=False) as batch_box:
                 batch_files = gr.File(
@@ -359,7 +385,6 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                     file_types=["image"],
                     type="filepath",
                     label=COPY["fa"]["batch_upload"],
-                    elem_id="batch-upload",
                 )
 
             profile = gr.Radio(
@@ -380,13 +405,29 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                 value=2.0,
                 step=0.5,
                 label=COPY["fa"]["scale"],
-                elem_id="scale",
             )
-            single_action = gr.Button(COPY["fa"]["process"], variant="primary", elem_id="single-action")
-            batch_action = gr.Button(COPY["fa"]["process_batch"], variant="primary", visible=False, elem_id="batch-action")
+            single_action = gr.Button(
+                COPY["fa"]["process"],
+                variant="primary",
+                elem_id="single-action",
+            )
+            batch_action = gr.Button(
+                COPY["fa"]["process_batch"],
+                variant="primary",
+                visible=False,
+                elem_id="batch-action",
+            )
             badges = gr.HTML(_badges("fa"))
-            batch_report = gr.Textbox(lines=5, label=COPY["fa"]["batch_result"], visible=False)
-            batch_zip = gr.File(label=COPY["fa"]["batch_zip"], visible=False)
+            batch_report = gr.Textbox(
+                lines=5,
+                label=COPY["fa"]["batch_result"],
+                visible=False,
+                elem_id="batch-report",
+            )
+            batch_zip = gr.File(
+                label=COPY["fa"]["batch_zip"],
+                visible=False,
+            )
 
     mode.change(
         fn=switch_mode,
@@ -402,6 +443,8 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
         inputs=[mode],
         outputs=[single_action, batch_action, batch_report, batch_zip],
     )
+
+    sample_button.click(fn=lambda: SAMPLE_SCAN, outputs=[input_image])
 
     language.change(
         fn=localize,
@@ -429,7 +472,6 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
         ],
     )
     theme.click(fn=None, js=THEME_JS)
-    sample_button.click(fn=lambda: SAMPLE_SCAN, outputs=[input_image])
 
     single_action.click(
         fn=run_single,
