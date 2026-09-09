@@ -32,15 +32,14 @@ def restore_visual(image: np.ndarray, profile: str = "طبیعی", scale: float 
     """Non-generative enhancement intended to preserve Persian glyph geometry."""
     image = resize_for_text(image, scale=scale)
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    lightness, a_channel, b_channel = cv2.split(lab)
+    if lab.ndim != 3 or lab.shape[2] != 3:
+        raise ValueError(f"تبدیل رنگ LAB نامعتبر است: shape={lab.shape}")
 
     clip = 1.8 if profile == "طبیعی" else 2.4 if profile == "سند" else 3.0
     clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
-    lightness = clahe.apply(lightness)
-    enhanced = cv2.cvtColor(
-        cv2.merge((lightness, a_channel, b_channel)),
-        cv2.COLOR_LAB2BGR,
-    )
+    lab = lab.copy()
+    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
     if profile == "اسکن ضعیف":
         enhanced = cv2.fastNlMeansDenoisingColored(enhanced, None, 4, 4, 7, 21)
