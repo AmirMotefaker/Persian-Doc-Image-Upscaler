@@ -9,15 +9,34 @@ from .io import load_image, save_png
 from .ocr import recognize
 
 
+def _stage(name: str, fn):
+    try:
+        return fn()
+    except Exception as exc:
+        raise RuntimeError(f"مرحله «{name}» ناموفق بود: {exc}") from exc
+
+
 def process_image(file_path: str, profile: str, scale: float = 2.0) -> tuple[str, str, str, str]:
-    image = load_image(file_path)
-    restored = restore_visual(image, profile=profile, scale=scale)
-    ocr_input = prepare_for_ocr(restored, profile=profile)
-    result = recognize(ocr_input)
+    image = _stage("بارگذاری تصویر", lambda: load_image(file_path))
+    restored = _stage(
+        "بهبود کیفیت",
+        lambda: restore_visual(image, profile=profile, scale=scale),
+    )
+    ocr_input = _stage(
+        "آماده‌سازی OCR",
+        lambda: prepare_for_ocr(restored, profile=profile),
+    )
+    result = _stage("تشخیص متن فارسی", lambda: recognize(ocr_input))
 
     workdir = Path(tempfile.mkdtemp(prefix="persian-upscaler-"))
-    restored_path = save_png(workdir / "enhanced.png", restored)
-    ocr_preview_path = save_png(workdir / "ocr-preprocessed.png", ocr_input)
+    restored_path = _stage(
+        "ذخیره تصویر بهبودیافته",
+        lambda: save_png(workdir / "enhanced.png", restored),
+    )
+    ocr_preview_path = _stage(
+        "ذخیره نمای OCR",
+        lambda: save_png(workdir / "ocr-preprocessed.png", ocr_input),
+    )
     text_path = workdir / "ocr.txt"
     json_path = workdir / "ocr.json"
 
