@@ -25,10 +25,20 @@ def resize_for_text(image: np.ndarray, scale: float = 2.0) -> np.ndarray:
     image = _ensure_bgr(image)
     if scale <= 1.0:
         return image.copy()
-    return cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4)
+    return cv2.resize(
+        image,
+        None,
+        fx=scale,
+        fy=scale,
+        interpolation=cv2.INTER_LANCZOS4,
+    )
 
 
-def restore_visual(image: np.ndarray, profile: str = "طبیعی", scale: float = 2.0) -> np.ndarray:
+def restore_visual(
+    image: np.ndarray,
+    profile: str = "طبیعی",
+    scale: float = 2.0,
+) -> np.ndarray:
     """Text-safe non-generative restoration intended to preserve Persian glyph geometry."""
     image = resize_for_text(image, scale=scale)
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -48,12 +58,11 @@ def restore_visual(image: np.ndarray, profile: str = "طبیعی", scale: float 
     amount = 1.14 if profile == "طبیعی" else 1.32 if profile == "سند" else 1.42
     sharpened = cv2.addWeighted(enhanced, amount, blurred, -(amount - 1.0), 0)
 
-    # Suppress small halos created around Persian dots and thin stems.
     return cv2.bilateralFilter(sharpened, 3, 18, 18)
 
 
 def prepare_for_ocr(restored: np.ndarray, profile: str = "طبیعی") -> np.ndarray:
-    """Create the canonical OCR preview; recognition itself evaluates multiple candidates."""
+    """Create the canonical OCR preview."""
     restored = _ensure_bgr(restored)
     gray = cv2.cvtColor(restored, cv2.COLOR_BGR2GRAY)
 
@@ -77,7 +86,7 @@ def build_ocr_candidates(
     restored: np.ndarray,
     profile: str = "طبیعی",
 ) -> list[tuple[str, np.ndarray]]:
-    """Generate complementary OCR views and let the recognizer choose the strongest result."""
+    """Generate a small, profile-aware set of OCR views."""
     restored = _ensure_bgr(restored)
     gray = cv2.cvtColor(restored, cv2.COLOR_BGR2GRAY)
 
@@ -85,14 +94,23 @@ def build_ocr_candidates(
     contrast = clahe.apply(gray)
     contrast = cv2.bilateralFilter(contrast, 5, 28, 28)
 
+    if profile == "طبیعی":
+        return [("restored-color", restored)]
+
     adaptive = cv2.adaptiveThreshold(
         contrast,
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
-        31 if profile != "اسکن ضعیف" else 41,
-        9 if profile != "اسکن ضعیف" else 12,
+        31 if profile == "سند" else 41,
+        9 if profile == "سند" else 12,
     )
+
+    if profile == "سند":
+        return [
+            ("restored-color", restored),
+            ("adaptive", adaptive),
+        ]
 
     _, otsu = cv2.threshold(
         contrast,
@@ -100,16 +118,8 @@ def build_ocr_candidates(
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
-
-    candidates: list[tuple[str, np.ndarray]] = [
-        ("restored-color", restored),
+    return [
         ("contrast-gray", contrast),
         ("adaptive", adaptive),
         ("otsu", otsu),
     ]
-
-    if profile == "طبیعی":
-        # Natural photos often lose detail after aggressive binarization.
-        candidates = candidates[:2] + [("otsu", otsu)]
-
-    return candidates
