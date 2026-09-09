@@ -5,7 +5,7 @@ $Repo = "https://github.com/AmirMotefaker/Persian-Doc-Image-Upscaler.git"
 $Root = "C:\Project\Persian-Doc-Image-Upscaler"
 $Branch = "feat/p0-platform-rebuild"
 $PythonVersion = "3.12"
-$ExpectedMarker = "BOOTSTRAP_V3"
+$ExpectedMarker = "BOOTSTRAP_V4"
 
 Write-Host "=== Persian Doc/Image Upscaler bootstrap [$ExpectedMarker] ===" -ForegroundColor Cyan
 Write-Host "Script path: $PSCommandPath" -ForegroundColor DarkGray
@@ -14,16 +14,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "Git is required but was not found in PATH."
 }
 
-function Invoke-External([scriptblock]$Command, [string]$ErrorMessage) {
-    & $Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "$ErrorMessage (exit code $LASTEXITCODE)"
-    }
-}
-
 function Get-Python312Command {
-    $candidates = @()
-
     $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
     if ($pyLauncher) {
         try {
@@ -71,6 +62,55 @@ function Install-Python312 {
     $env:Path = "$machinePath;$userPath"
 }
 
+function Stop-RepoVenvProcesses([string]$VenvRoot) {
+    $normalized = [System.IO.Path]::GetFullPath($VenvRoot).TrimEnd('\')
+    $matches = @()
+
+    try {
+        $matches = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+    } catch {
+        Write-Host "Could not enumerate process executable paths; continuing with delete retry." -ForegroundColor DarkYellow
+    }
+
+    foreach ($proc in $matches) {
+        Write-Host "Stopping locked venv process PID $($proc.ProcessId): $($proc.Name)" -ForegroundColor DarkYellow
+        try {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+        } catch {
+            Write-Host "Failed to stop PID $($proc.ProcessId): $($_.Exception.Message)" -ForegroundColor DarkYellow
+        }
+    }
+
+    if ($matches.Count -gt 0) {
+        Start-Sleep -Milliseconds 700
+    }
+}
+
+function Remove-VenvSafely([string]$VenvPath) {
+    if (-not (Test-Path $VenvPath)) { return }
+
+    $full = [System.IO.Path]::GetFullPath($VenvPath)
+    Stop-RepoVenvProcesses $full
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+            Write-Host "Old virtual environment removed." -ForegroundColor Green
+            return
+        } catch {
+            $lastError = $_
+            Write-Host "Venv delete attempt $attempt failed; retrying..." -ForegroundColor DarkYellow
+            Stop-RepoVenvProcesses $full
+            Start-Sleep -Milliseconds (500 * $attempt)
+        }
+    }
+
+    throw "Unable to remove locked virtual environment at $full. Last error: $($lastError.Exception.Message)"
+}
+
 $PythonCommand = Get-Python312Command
 if (-not $PythonCommand) {
     Install-Python312
@@ -78,7 +118,7 @@ if (-not $PythonCommand) {
 }
 
 if (-not $PythonCommand) {
-    throw "Python 3.12 installation finished but this process still cannot discover it. The installer may require a new shell. Reopen PowerShell and rerun the same bootstrap command; no manual file edits are required."
+    throw "Python 3.12 installation finished but this process still cannot discover it. Reopen PowerShell and rerun the same bootstrap command; no manual file edits are required."
 }
 
 Write-Host "Python 3.12 detected: $($PythonCommand -join ' ')" -ForegroundColor Green
@@ -104,8 +144,8 @@ git pull --ff-only origin $Branch
 if ($LASTEXITCODE -ne 0) { throw "git pull failed." }
 
 if (Test-Path ".venv") {
-    Write-Host "Removing incomplete/old virtual environment..." -ForegroundColor DarkYellow
-    Remove-Item -Recurse -Force ".venv"
+    Write-Host "Removing incomplete/old virtual environment safely..." -ForegroundColor DarkYellow
+    Remove-VenvSafely ".venv"
 }
 
 Write-Host "Creating Python 3.12 virtual environment..." -ForegroundColor Yellow
