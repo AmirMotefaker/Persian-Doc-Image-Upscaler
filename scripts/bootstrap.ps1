@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $Repo = "https://github.com/AmirMotefaker/Persian-Doc-Image-Upscaler.git"
 $Root = "C:\Project\Persian-Doc-Image-Upscaler"
 $Branch = "feat/p0-platform-rebuild"
-$ExpectedMarker = "BOOTSTRAP_V6"
+$ExpectedMarker = "BOOTSTRAP_V7"
 
 Write-Host "=== Persian Doc/Image Upscaler bootstrap [$ExpectedMarker] ===" -ForegroundColor Cyan
 Write-Host "Script path: $PSCommandPath" -ForegroundColor DarkGray
@@ -123,6 +123,36 @@ function Clear-PythonTlsOverrides {
     }
 }
 
+function Test-VenvPython312([string]$PythonExe) {
+    if (-not (Test-Path $PythonExe)) { return $false }
+    try {
+        $version = & $PythonExe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
+        return ($LASTEXITCODE -eq 0 -and $version.Trim() -eq "3.12")
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-PipWithRetry([string[]]$Arguments, [string]$Label) {
+    $maxAttempts = 4
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        Write-Host "$Label (attempt $attempt/$maxAttempts)..." -ForegroundColor Yellow
+        & $Py -m pip @Arguments --retries 20 --timeout 120 --progress-bar off
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "$Label completed." -ForegroundColor Green
+            return
+        }
+
+        if ($attempt -lt $maxAttempts) {
+            $delay = 8 * $attempt
+            Write-Host "$Label failed; retrying in $delay seconds. Existing pip cache will be reused." -ForegroundColor DarkYellow
+            Start-Sleep -Seconds $delay
+        }
+    }
+
+    throw "$Label failed after $maxAttempts attempts."
+}
+
 $PythonCommand = Get-Python312Command
 if (-not $PythonCommand) {
     Install-Python312
@@ -150,24 +180,30 @@ if ($LASTEXITCODE -ne 0) {
 git pull --ff-only origin $Branch
 if ($LASTEXITCODE -ne 0) { throw "git pull failed." }
 
-if (Test-Path ".venv") {
-    Write-Host "Removing incomplete/old virtual environment safely..." -ForegroundColor DarkYellow
-    Remove-VenvSafely ".venv"
-}
-
 Clear-PythonTlsOverrides
 
-Write-Host "Creating Python 3.12 virtual environment..." -ForegroundColor Yellow
-if ($PythonCommand.Count -eq 2) {
-    & $PythonCommand[0] $PythonCommand[1] -m venv .venv
-} else {
-    & $PythonCommand[0] -m venv .venv
-}
-if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed." }
-
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
-if (-not (Test-Path $Py)) { throw "Virtual environment Python was not created at $Py" }
-Write-Host "Virtual environment ready: $Py" -ForegroundColor Green
+if (Test-VenvPython312 $Py) {
+    Write-Host "Reusing valid Python 3.12 virtual environment: $Py" -ForegroundColor Green
+} else {
+    if (Test-Path ".venv") {
+        Write-Host "Removing invalid/incomplete virtual environment safely..." -ForegroundColor DarkYellow
+        Remove-VenvSafely ".venv"
+    }
+
+    Write-Host "Creating Python 3.12 virtual environment..." -ForegroundColor Yellow
+    if ($PythonCommand.Count -eq 2) {
+        & $PythonCommand[0] $PythonCommand[1] -m venv .venv
+    } else {
+        & $PythonCommand[0] -m venv .venv
+    }
+    if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed." }
+
+    if (-not (Test-VenvPython312 $Py)) {
+        throw "Virtual environment Python was not created correctly at $Py"
+    }
+    Write-Host "Virtual environment ready: $Py" -ForegroundColor Green
+}
 
 & $Py -m pip --version
 if ($LASTEXITCODE -ne 0) { throw "Bundled pip is unavailable." }
@@ -179,14 +215,15 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "pip CA bundle verified: $PipCa" -ForegroundColor Green
 
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+$env:PIP_DEFAULT_TIMEOUT = "120"
+$env:PIP_RETRIES = "20"
+$env:PIP_CACHE_DIR = Join-Path $env:LOCALAPPDATA "pip\Cache"
 
-Write-Host "Installing runtime dependencies..." -ForegroundColor Yellow
-& $Py -m pip install -r requirements.txt
-if ($LASTEXITCODE -ne 0) { throw "requirements installation failed." }
+Write-Host "pip cache: $env:PIP_CACHE_DIR" -ForegroundColor DarkGray
 
-Write-Host "Installing development dependencies..." -ForegroundColor Yellow
-& $Py -m pip install -e ".[dev]"
-if ($LASTEXITCODE -ne 0) { throw "development dependencies installation failed." }
+Invoke-PipWithRetry @("install", "paddlepaddle==3.3.1") "Installing PaddlePaddle runtime"
+Invoke-PipWithRetry @("install", "-r", "requirements.txt") "Installing runtime dependencies"
+Invoke-PipWithRetry @("install", "-e", ".[dev]") "Installing development dependencies"
 
 Write-Host "=== Quality gates ===" -ForegroundColor Yellow
 & $Py -m ruff check src tests
