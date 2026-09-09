@@ -16,7 +16,12 @@ def _stage(name: str, fn):
         raise RuntimeError(f"مرحله «{name}» ناموفق بود: {exc}") from exc
 
 
-def process_image(file_path: str, profile: str, scale: float = 2.0) -> tuple[str, str, str, str]:
+def process_image(
+    file_path: str,
+    profile: str,
+    scale: float = 2.0,
+    language: str = "fa",
+) -> tuple[str, str, str, str]:
     image = _stage("بارگذاری تصویر", lambda: load_image(file_path))
     restored = _stage(
         "بهبود کیفیت",
@@ -54,9 +59,16 @@ def process_image(file_path: str, profile: str, scale: float = 2.0) -> tuple[str
         encoding="utf-8",
     )
 
-    summary = (
-        f"{result.text}\n\n"
-        f"میانگین اطمینان OCR: {result.average_confidence * 100:.2f}%\n"
-        f"تعداد خطوط شناسایی‌شده: {len(result.lines)}"
-    )
+    if language == "en":
+        meta = (
+            f"Average OCR confidence: {result.average_confidence * 100:.2f}%\n"
+            f"Recognized lines: {len(result.lines)}"
+        )
+    else:
+        meta = (
+            f"میانگین اطمینان OCR: {result.average_confidence * 100:.2f}%\n"
+            f"تعداد خطوط شناسایی‌شده: {len(result.lines)}"
+        )
+
+    summary = f"{result.text}\n\n{meta}"
     return restored_path, ocr_preview_path, summary, str(text_path)
