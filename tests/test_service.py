@@ -3,8 +3,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from persian_upscaler.ocr import OCRResult
 from persian_upscaler import service
+from persian_upscaler.ocr import OCRResult
 
 
 def test_process_image_grayscale_file_end_to_end(tmp_path, monkeypatch):
