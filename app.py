@@ -1,8 +1,3 @@
-
-#### ۳. محتوای فایل `app.py`:
-*(این کد طولانی است، کل آن را یکجا کپی و در فایل app.py پیست کنید)*
-
-```python
 import gradio as gr
 import cv2
 import numpy as np
@@ -11,9 +6,8 @@ import os
 from paddleocr import PaddleOCR
 from basicsr.archs.rrdbnet_arch import RRDBNet
 from realesrgan import RealESRGANer
-import fitz  # PyMuPDF for PDF processing
+import fitz
 
-# Initialize Real-ESRGAN
 model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
 upsampler = RealESRGANer(
     scale=4,
@@ -25,19 +19,13 @@ upsampler = RealESRGANer(
     half=False
 )
 
-# Initialize Persian OCR
 ocr_engine = PaddleOCR(use_angle_cls=True, lang='fa', use_gpu=False, show_log=False)
 
 def enhance_persian_image(img_cv):
-    """Core image enhancement with Persian-specific post-processing"""
     output, _ = upsampler.enhance(img_cv, outscale=4)
     gray = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)
-    
-    # Unsharp Mask for sharpening letter edges
     blurred = cv2.GaussianBlur(gray, (0, 0), 2.0)
     sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
-    
-    # Adaptive Thresholding to make dots and teeth solid black
     binary = cv2.adaptiveThreshold(
         sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
     )
@@ -89,7 +77,7 @@ def process_pdf_file(pdf_file):
     
     for page_num in range(num_pages):
         page = doc[page_num]
-        mat = fitz.Matrix(3.0, 3.0) # 3x zoom for high quality
+        mat = fitz.Matrix(3.0, 3.0)
         pix = page.get_pixmap(matrix=mat)
         
         img_data = np.frombuffer(pix.samples, dtype=np.uint8)
@@ -121,7 +109,6 @@ def process_pdf_file(pdf_file):
             
         progress_text += f"✅ صفحه {page_num + 1} از {num_pages} پردازش شد\n"
     
-    # Create enhanced PDF
     output_pdf_path = os.path.join(temp_dir, "enhanced_document.pdf")
     pdf_writer = fitz.open()
     
@@ -140,30 +127,29 @@ def process_pdf_file(pdf_file):
     
     return output_pdf_path, f"{progress_text}\n\n📝 متن استخراج شده:\n{all_text}"
 
-# Gradio UI
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), title="Persian Doc Upscaler") as demo:
     gr.Markdown("# 🇮🇷 Persian Doc & Image Upscaler + OCR")
     gr.Markdown("افزایش کیفیت خودکار اسناد، تصاویر و PDFهای فارسی + استخراج متن با حفظ نقاط و دندانه‌ها")
     
-    with gr.Tab("🖼️ پردازش تصویر"):
+    with gr.Tab("پردازش تصویر"):
         with gr.Row():
             with gr.Column():
-                input_img = gr.Image(type="pil", label="📤 تصویر را آپلود کنید (JPG, PNG, BMP, TIFF)")
+                input_img = gr.Image(type="pil", label="تصویر را آپلود کنید (JPG, PNG, BMP, TIFF)")
                 submit_img_btn = gr.Button("🚀 افزایش کیفیت و استخراج متن", variant="primary")
             with gr.Column():
-                output_img = gr.Image(type="numpy", label="📥 تصویر بهبودیافته (۴ برابر)")
-                output_text_img = gr.Textbox(label="📝 متن استخراج‌شده", lines=8, show_copy_button=True)
+                output_img = gr.Image(type="numpy", label="تصویر بهبودیافته (۴ برابر)")
+                output_text_img = gr.Textbox(label="متن استخراج‌شده", lines=8, show_copy_button=True)
         submit_img_btn.click(fn=process_image_file, inputs=input_img, outputs=[output_img, output_text_img])
     
-    with gr.Tab("📕 پردازش PDF"):
+    with gr.Tab("پردازش PDF"):
         gr.Markdown("### پردازش اسناد PDF فارسی (چند صفحه‌ای)")
         with gr.Row():
             with gr.Column():
-                input_pdf = gr.File(label="📤 فایل PDF را آپلود کنید", file_types=[".pdf"])
+                input_pdf = gr.File(label="فایل PDF را آپلود کنید", file_types=[".pdf"])
                 submit_pdf_btn = gr.Button("🚀 پردازش PDF و استخراج متن", variant="primary")
             with gr.Column():
-                output_pdf = gr.File(label="📥 PDF بهبودیافته (دانلود)")
-                output_text_pdf = gr.Textbox(label="📝 متن استخراج‌شده از تمام صفحات", lines=12, show_copy_button=True)
+                output_pdf = gr.File(label="PDF بهبودیافته (دانلود)")
+                output_text_pdf = gr.Textbox(label="متن استخراج‌شده از تمام صفحات", lines=12, show_copy_button=True)
         submit_pdf_btn.click(fn=process_pdf_file, inputs=input_pdf, outputs=[output_pdf, output_text_pdf])
 
 if __name__ == "__main__":
