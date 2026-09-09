@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
 import numpy as np
+
+# PaddlePaddle 3.3.x can fail on Windows CPU when PIR and oneDNN are combined
+# for some OCR graphs. These flags must be set before importing PaddleOCR.
+os.environ.setdefault("FLAGS_enable_pir_api", "0")
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
 from paddleocr import PaddleOCR
 
 
@@ -38,6 +45,7 @@ def get_ocr(device: str = "cpu") -> PaddleOCR:
         lang="fa",
         ocr_version="PP-OCRv5",
         device=device,
+        enable_mkldnn=False,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=True,
