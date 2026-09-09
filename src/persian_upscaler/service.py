@@ -5,9 +5,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from .enhancement import prepare_for_ocr, restore_visual
+from .enhancement import build_ocr_candidates, prepare_for_ocr, restore_visual
 from .io import load_image, save_image, save_png
-from .ocr import recognize
+from .ocr import recognize_best
 
 
 def _stage(name_fa: str, name_en: str, language: str, fn):
@@ -39,11 +39,17 @@ def process_image(
         language,
         lambda: prepare_for_ocr(restored, profile=profile),
     )
-    result = _stage(
-        "تشخیص متن فارسی",
-        "Persian text recognition",
+    candidates = _stage(
+        "ساخت نماهای OCR",
+        "OCR candidate generation",
         language,
-        lambda: recognize(ocr_input),
+        lambda: build_ocr_candidates(restored, profile=profile),
+    )
+    result = _stage(
+        "تشخیص چندمرحله‌ای متن فارسی",
+        "Multi-pass Persian text recognition",
+        language,
+        lambda: recognize_best(candidates),
     )
 
     workdir = Path(tempfile.mkdtemp(prefix="persian-upscaler-"))
@@ -68,6 +74,7 @@ def process_image(
             {
                 "text": result.text,
                 "average_confidence": result.average_confidence,
+                "selected_pass": result.pass_name,
                 "lines": [{"text": text, "confidence": score} for text, score in result.lines],
             },
             ensure_ascii=False,
@@ -79,12 +86,14 @@ def process_image(
     if language == "en":
         meta = (
             f"Average OCR confidence: {result.average_confidence * 100:.2f}%\n"
-            f"Recognized lines: {len(result.lines)}"
+            f"Recognized lines: {len(result.lines)}\n"
+            f"Selected OCR pass: {result.pass_name}"
         )
     else:
         meta = (
             f"میانگین اطمینان OCR: {result.average_confidence * 100:.2f}%\n"
-            f"تعداد خطوط شناسایی‌شده: {len(result.lines)}"
+            f"تعداد خطوط شناسایی‌شده: {len(result.lines)}\n"
+            f"بهترین مسیر OCR: {result.pass_name}"
         )
 
     summary = f"{result.text}\n\n{meta}"
