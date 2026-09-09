@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import tempfile
+import zipfile
 from pathlib import Path
 
 from .enhancement import prepare_for_ocr, restore_visual
-from .io import load_image, save_png
+from .io import load_image, save_image, save_png
 from .ocr import recognize
 
 
@@ -23,6 +24,7 @@ def process_image(
     profile: str,
     scale: float = 2.0,
     language: str = "fa",
+    output_format: str = "PNG",
 ) -> tuple[str, str, str, str]:
     image = _stage("بارگذاری تصویر", "Image loading", language, lambda: load_image(file_path))
     restored = _stage(
@@ -49,7 +51,7 @@ def process_image(
         "ذخیره تصویر بهبودیافته",
         "Saving enhanced image",
         language,
-        lambda: save_png(workdir / "enhanced.png", restored),
+        lambda: save_image(workdir, "enhanced", restored, output_format),
     )
     ocr_preview_path = _stage(
         "ذخیره نمای OCR",
@@ -87,3 +89,37 @@ def process_image(
 
     summary = f"{result.text}\n\n{meta}"
     return restored_path, ocr_preview_path, summary, str(text_path)
+
+
+def process_batch(
+    file_paths: list[str],
+    profile: str,
+    scale: float = 2.0,
+    language: str = "fa",
+    output_format: str = "PNG",
+) -> tuple[str, str]:
+    if not file_paths:
+        raise ValueError("هیچ فایلی برای پردازش گروهی انتخاب نشده است.")
+    if len(file_paths) > 20:
+        raise ValueError("حداکثر ۲۰ تصویر در هر پردازش گروهی پشتیبانی می‌شود.")
+
+    batch_dir = Path(tempfile.mkdtemp(prefix="persian-upscaler-batch-"))
+    zip_path = batch_dir / "daqiqkhan-batch.zip"
+    report_lines: list[str] = []
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, file_path in enumerate(file_paths, start=1):
+            enhanced, _, summary, text_file = process_image(
+                file_path,
+                profile=profile,
+                scale=scale,
+                language=language,
+                output_format=output_format,
+            )
+            source_name = Path(file_path).stem
+            archive.write(enhanced, arcname=f"{index:02d}-{source_name}{Path(enhanced).suffix}")
+            archive.write(text_file, arcname=f"{index:02d}-{source_name}.txt")
+            report_lines.append(f"{index}. {Path(file_path).name}\n{summary}")
+
+    report = "\n\n".join(report_lines)
+    return str(zip_path), report
