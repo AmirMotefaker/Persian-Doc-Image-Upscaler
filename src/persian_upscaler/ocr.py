@@ -21,6 +21,7 @@ class OCRResult:
     text: str
     average_confidence: float
     lines: tuple[tuple[str, float], ...]
+    pass_name: str = "default"
 
 
 def _find_payload(node: Any) -> dict[str, Any] | None:
@@ -57,6 +58,34 @@ def _normalize_inference_image(image: np.ndarray) -> np.ndarray:
     return image
 
 
+def _ordered_indices(payload: dict[str, Any], count: int) -> list[int]:
+    boxes = payload.get("rec_boxes")
+    if boxes is None:
+        return list(range(count))
+
+    try:
+        array = np.asarray(boxes, dtype=float)
+    except (TypeError, ValueError):
+        return list(range(count))
+
+    if array.ndim != 2 or array.shape[0] != count or array.shape[1] < 4:
+        return list(range(count))
+
+    # Reading order for Persian documents: top to bottom, and right to left within a line.
+    heights = np.maximum(1.0, array[:, 3] - array[:, 1])
+    median_height = float(np.median(heights)) if count else 1.0
+    line_quantum = max(8.0, median_height * 0.65)
+
+    keyed: list[tuple[float, float, int]] = []
+    for index, box in enumerate(array):
+        center_y = float((box[1] + box[3]) / 2.0)
+        right_x = float(max(box[0], box[2]))
+        line_bucket = round(center_y / line_quantum)
+        keyed.append((line_bucket, -right_x, index))
+
+    return [item[2] for item in sorted(keyed)]
+
+
 @lru_cache(maxsize=2)
 def get_ocr(device: str = "cpu") -> PaddleOCR:
     return PaddleOCR(
@@ -70,7 +99,7 @@ def get_ocr(device: str = "cpu") -> PaddleOCR:
     )
 
 
-def recognize(image: np.ndarray, device: str = "cpu") -> OCRResult:
+def recognize(image: np.ndarray, device: str = "cpu", pass_name: str = "default") -> OCRResult:
     inference_image = _normalize_inference_image(image)
     results = get_ocr(device).predict(inference_image)
     lines: list[tuple[str, float]] = []
@@ -81,7 +110,9 @@ def recognize(image: np.ndarray, device: str = "cpu") -> OCRResult:
             continue
         texts = payload.get("rec_texts") or []
         scores = payload.get("rec_scores") or []
-        for index, text in enumerate(texts):
+        order = _ordered_indices(payload, len(texts))
+        for index in order:
+            text = texts[index]
             cleaned = str(text).strip()
             if not cleaned:
                 continue
@@ -93,4 +124,26 @@ def recognize(image: np.ndarray, device: str = "cpu") -> OCRResult:
         text="\n".join(text for text, _ in lines),
         average_confidence=average,
         lines=tuple(lines),
+        pass_name=pass_name,
     )
+
+
+def _quality_key(result: OCRResult) -> tuple[float, int, int]:
+    useful_chars = sum(1 for char in result.text if not char.isspace())
+    confident_lines = sum(1 for _, score in result.lines if score >= 0.65)
+    return (round(result.average_confidence, 5), confident_lines, useful_chars)
+
+
+def recognize_best(
+    candidates: list[tuple[str, np.ndarray]],
+    device: str = "cpu",
+) -> OCRResult:
+    """Run complementary document views and retain the strongest OCR result."""
+    if not candidates:
+        raise ValueError("هیچ ورودی OCR برای ارزیابی وجود ندارد.")
+
+    results = [
+        recognize(image, device=device, pass_name=name)
+        for name, image in candidates
+    ]
+    return max(results, key=_quality_key)
