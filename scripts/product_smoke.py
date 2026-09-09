@@ -7,10 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app import SAMPLE_SCAN, run_single
-
 
 def main() -> None:
+    from app import SAMPLE_SCAN, run_single
+
     comparison, ocr_preview, summary, enhanced, text_file = run_single(
         SAMPLE_SCAN,
         "سند",
