@@ -1,8 +1,5 @@
-from __future__ import annotations
-
 import cv2
 import numpy as np
-
 
 PROFILES = ("طبیعی", "سند", "اسکن ضعیف")
 
@@ -28,12 +25,15 @@ def restore_visual(image: np.ndarray, profile: str = "طبیعی", scale: float 
     """Non-generative enhancement intended to preserve Persian glyph geometry."""
     image = resize_for_text(image, scale=scale)
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
+    lightness, a_channel, b_channel = cv2.split(lab)
 
     clip = 1.8 if profile == "طبیعی" else 2.4 if profile == "سند" else 3.0
     clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    enhanced = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+    lightness = clahe.apply(lightness)
+    enhanced = cv2.cvtColor(
+        cv2.merge((lightness, a_channel, b_channel)),
+        cv2.COLOR_LAB2BGR,
+    )
 
     if profile == "اسکن ضعیف":
         enhanced = cv2.fastNlMeansDenoisingColored(enhanced, None, 4, 4, 7, 21)
