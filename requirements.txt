@@ -1,9 +1,6 @@
-gradio==4.44.1
-realesrgan==0.3.0
-basicsr==1.4.2
-paddlepaddle==2.6.1
-paddleocr==2.7.3
-opencv-python==4.10.0.84
-numpy==1.26.4
-Pillow==10.4.0
-PyMuPDF==1.24.11
+gradio>=6.0,<7
+paddleocr==3.7.0
+paddlepaddle==3.3.1
+opencv-python-headless>=4.10,<5
+numpy>=1.26,<3
+Pillow>=10.4,<12
