@@ -29,7 +29,7 @@ def resize_for_text(image: np.ndarray, scale: float = 2.0) -> np.ndarray:
 
 
 def restore_visual(image: np.ndarray, profile: str = "طبیعی", scale: float = 2.0) -> np.ndarray:
-    """Non-generative enhancement intended to preserve Persian glyph geometry."""
+    """Text-safe non-generative restoration intended to preserve Persian glyph geometry."""
     image = resize_for_text(image, scale=scale)
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     if lab.ndim != 3 or lab.shape[2] != 3:
@@ -44,13 +44,16 @@ def restore_visual(image: np.ndarray, profile: str = "طبیعی", scale: float 
     if profile == "اسکن ضعیف":
         enhanced = cv2.fastNlMeansDenoisingColored(enhanced, None, 4, 4, 7, 21)
 
-    blurred = cv2.GaussianBlur(enhanced, (0, 0), 1.0)
-    amount = 1.15 if profile == "طبیعی" else 1.35
-    return cv2.addWeighted(enhanced, amount, blurred, -(amount - 1.0), 0)
+    blurred = cv2.GaussianBlur(enhanced, (0, 0), 0.9)
+    amount = 1.14 if profile == "طبیعی" else 1.32 if profile == "سند" else 1.42
+    sharpened = cv2.addWeighted(enhanced, amount, blurred, -(amount - 1.0), 0)
+
+    # Suppress small halos created around Persian dots and thin stems.
+    return cv2.bilateralFilter(sharpened, 3, 18, 18)
 
 
 def prepare_for_ocr(restored: np.ndarray, profile: str = "طبیعی") -> np.ndarray:
-    """Create a dedicated OCR image without altering the user's visual output."""
+    """Create the canonical OCR preview; recognition itself evaluates multiple candidates."""
     restored = _ensure_bgr(restored)
     gray = cv2.cvtColor(restored, cv2.COLOR_BGR2GRAY)
 
@@ -68,3 +71,42 @@ def prepare_for_ocr(restored: np.ndarray, profile: str = "طبیعی") -> np.nda
         block_size,
         c_value,
     )
+
+
+def build_ocr_candidates(restored: np.ndarray, profile: str = "طبیعی") -> list[tuple[str, np.ndarray]]:
+    """Generate complementary OCR views and let the recognizer choose the strongest result."""
+    restored = _ensure_bgr(restored)
+    gray = cv2.cvtColor(restored, cv2.COLOR_BGR2GRAY)
+
+    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+    contrast = clahe.apply(gray)
+    contrast = cv2.bilateralFilter(contrast, 5, 28, 28)
+
+    adaptive = cv2.adaptiveThreshold(
+        contrast,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31 if profile != "اسکن ضعیف" else 41,
+        9 if profile != "اسکن ضعیف" else 12,
+    )
+
+    _, otsu = cv2.threshold(
+        contrast,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+    )
+
+    candidates: list[tuple[str, np.ndarray]] = [
+        ("restored-color", restored),
+        ("contrast-gray", contrast),
+        ("adaptive", adaptive),
+        ("otsu", otsu),
+    ]
+
+    if profile == "طبیعی":
+        # Natural photos often lose detail after aggressive binarization.
+        candidates = candidates[:2] + [("otsu", otsu)]
+
+    return candidates
