@@ -9,8 +9,15 @@ def _ensure_bgr(image: np.ndarray) -> np.ndarray:
         raise ValueError("تصویر معتبر نیست.")
     if image.ndim == 2:
         return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    if image.shape[2] == 4:
+    if image.ndim != 3:
+        raise ValueError("ساختار کانال‌های تصویر پشتیبانی نمی‌شود.")
+    channels = image.shape[2]
+    if channels == 1:
+        return cv2.cvtColor(image[:, :, 0], cv2.COLOR_GRAY2BGR)
+    if channels == 4:
         return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    if channels != 3:
+        raise ValueError(f"تعداد کانال‌های تصویر پشتیبانی نمی‌شود: {channels}")
     return image
 
 
