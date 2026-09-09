@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $Repo = "https://github.com/AmirMotefaker/Persian-Doc-Image-Upscaler.git"
 $Root = "C:\Project\Persian-Doc-Image-Upscaler"
 $Branch = "feat/p0-platform-rebuild"
-$ExpectedMarker = "BOOTSTRAP_V5"
+$ExpectedMarker = "BOOTSTRAP_V6"
 
 Write-Host "=== Persian Doc/Image Upscaler bootstrap [$ExpectedMarker] ===" -ForegroundColor Cyan
 Write-Host "Script path: $PSCommandPath" -ForegroundColor DarkGray
@@ -66,10 +66,13 @@ function Stop-RepoVenvProcesses([string]$VenvRoot) {
     $matches = @()
 
     try {
-        $matches = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
-            $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)
-        }
+        $matches = @(
+            Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+                $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)
+            }
+        )
     } catch {
+        $matches = @()
         Write-Host "Could not enumerate process executable paths; continuing with delete retry." -ForegroundColor DarkYellow
     }
 
@@ -82,7 +85,9 @@ function Stop-RepoVenvProcesses([string]$VenvRoot) {
         }
     }
 
-    if ($matches.Count -gt 0) { Start-Sleep -Milliseconds 700 }
+    if (@($matches).Count -gt 0) {
+        Start-Sleep -Milliseconds 700
+    }
 }
 
 function Remove-VenvSafely([string]$VenvPath) {
@@ -164,8 +169,6 @@ $Py = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path $Py)) { throw "Virtual environment Python was not created at $Py" }
 Write-Host "Virtual environment ready: $Py" -ForegroundColor Green
 
-# Keep the pip bundled with Python 3.12. On Windows, self-upgrading pip inside the
-# freshly-created venv can transiently invalidate pip's vendored certifi bundle.
 & $Py -m pip --version
 if ($LASTEXITCODE -ne 0) { throw "Bundled pip is unavailable." }
 
