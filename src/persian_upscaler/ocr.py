@@ -14,8 +14,10 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 from paddleocr import PaddleOCR
 
-MAX_OCR_PIXELS = 4_000_000
-MAX_OCR_SIDE = 2600
+MAX_OCR_PIXELS = 1_500_000
+MAX_OCR_SIDE = 1600
+FALLBACK_CONFIDENCE = 0.72
+FALLBACK_MIN_LINES = 4
 
 
 @dataclass(frozen=True)
@@ -108,11 +110,18 @@ def get_ocr(device: str = "cpu") -> PaddleOCR:
         lang="fa",
         ocr_version="PP-OCRv5",
         device=device,
+        text_detection_model_name="PP-OCRv5_mobile_det",
         enable_mkldnn=False,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
     )
+
+
+def warmup(device: str = "cpu") -> None:
+    started = perf_counter()
+    get_ocr(device)
+    print(f"[OCR] model ready elapsed={perf_counter() - started:.2f}s", flush=True)
 
 
 def recognize(
@@ -123,10 +132,7 @@ def recognize(
     started = perf_counter()
     inference_image = _normalize_inference_image(image)
     height, width = inference_image.shape[:2]
-    print(
-        f"[OCR] start pass={pass_name} size={width}x{height}",
-        flush=True,
-    )
+    print(f"[OCR] start pass={pass_name} size={width}x{height}", flush=True)
 
     results = get_ocr(device).predict(inference_image)
     lines: list[tuple[str, float]] = []
@@ -167,6 +173,13 @@ def _quality_key(result: OCRResult) -> tuple[float, int, int]:
     return (round(result.average_confidence, 5), confident_lines, useful_chars)
 
 
+def _needs_fallback(result: OCRResult) -> bool:
+    return (
+        result.average_confidence < FALLBACK_CONFIDENCE
+        or len(result.lines) < FALLBACK_MIN_LINES
+    )
+
+
 def recognize_best(
     candidates: list[tuple[str, np.ndarray]],
     device: str = "cpu",
@@ -175,9 +188,19 @@ def recognize_best(
         raise ValueError("هیچ ورودی OCR برای ارزیابی وجود ندارد.")
 
     total_started = perf_counter()
-    results: list[OCRResult] = []
-    for name, image in candidates:
-        results.append(recognize(image, device=device, pass_name=name))
+    first_name, first_image = candidates[0]
+    results = [recognize(first_image, device=device, pass_name=first_name)]
+
+    if len(candidates) > 1 and _needs_fallback(results[0]):
+        second_name, second_image = candidates[1]
+        print(
+            f"[OCR] fallback enabled confidence={results[0].average_confidence:.4f} "
+            f"lines={len(results[0].lines)}",
+            flush=True,
+        )
+        results.append(recognize(second_image, device=device, pass_name=second_name))
+    elif len(candidates) > 1:
+        print("[OCR] fallback skipped", flush=True)
 
     best = max(results, key=_quality_key)
     print(
