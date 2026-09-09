@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "persian-doc-image-upscaler"
+version = "0.1.0.dev0"
+description = "Persian-first image enhancement and OCR platform"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "AmirMotefaker" }]
+dependencies = [
+  "gradio>=6.0,<7",
+  "paddleocr==3.7.0",
+  "paddlepaddle==3.3.1",
+  "opencv-python-headless>=4.10,<5",
+  "numpy>=1.26,<3",
+  "Pillow>=10.4,<12",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "ruff>=0.9,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
