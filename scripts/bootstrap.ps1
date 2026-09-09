@@ -4,8 +4,7 @@ Set-StrictMode -Version Latest
 $Repo = "https://github.com/AmirMotefaker/Persian-Doc-Image-Upscaler.git"
 $Root = "C:\Project\Persian-Doc-Image-Upscaler"
 $Branch = "feat/p0-platform-rebuild"
-$PythonVersion = "3.12"
-$ExpectedMarker = "BOOTSTRAP_V4"
+$ExpectedMarker = "BOOTSTRAP_V5"
 
 Write-Host "=== Persian Doc/Image Upscaler bootstrap [$ExpectedMarker] ===" -ForegroundColor Cyan
 Write-Host "Script path: $PSCommandPath" -ForegroundColor DarkGray
@@ -83,9 +82,7 @@ function Stop-RepoVenvProcesses([string]$VenvRoot) {
         }
     }
 
-    if ($matches.Count -gt 0) {
-        Start-Sleep -Milliseconds 700
-    }
+    if ($matches.Count -gt 0) { Start-Sleep -Milliseconds 700 }
 }
 
 function Remove-VenvSafely([string]$VenvPath) {
@@ -93,8 +90,8 @@ function Remove-VenvSafely([string]$VenvPath) {
 
     $full = [System.IO.Path]::GetFullPath($VenvPath)
     Stop-RepoVenvProcesses $full
-
     $lastError = $null
+
     for ($attempt = 1; $attempt -le 6; $attempt++) {
         try {
             Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
@@ -111,12 +108,21 @@ function Remove-VenvSafely([string]$VenvPath) {
     throw "Unable to remove locked virtual environment at $full. Last error: $($lastError.Exception.Message)"
 }
 
+function Clear-PythonTlsOverrides {
+    foreach ($name in @("PIP_CERT", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE")) {
+        if (Test-Path "Env:$name") {
+            $value = (Get-Item "Env:$name").Value
+            Write-Host "Clearing inherited TLS override $name=$value" -ForegroundColor DarkYellow
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 $PythonCommand = Get-Python312Command
 if (-not $PythonCommand) {
     Install-Python312
     $PythonCommand = Get-Python312Command
 }
-
 if (-not $PythonCommand) {
     throw "Python 3.12 installation finished but this process still cannot discover it. Reopen PowerShell and rerun the same bootstrap command; no manual file edits are required."
 }
@@ -124,22 +130,18 @@ if (-not $PythonCommand) {
 Write-Host "Python 3.12 detected: $($PythonCommand -join ' ')" -ForegroundColor Green
 
 if (-not (Test-Path $Root)) {
-    Write-Host "Cloning repository..." -ForegroundColor Yellow
     git clone $Repo $Root
     if ($LASTEXITCODE -ne 0) { throw "git clone failed." }
 }
 
 Set-Location $Root
-
 git fetch origin --prune
 if ($LASTEXITCODE -ne 0) { throw "git fetch failed." }
-
 git switch $Branch 2>$null
 if ($LASTEXITCODE -ne 0) {
     git switch -c $Branch --track "origin/$Branch"
     if ($LASTEXITCODE -ne 0) { throw "Unable to switch to $Branch." }
 }
-
 git pull --ff-only origin $Branch
 if ($LASTEXITCODE -ne 0) { throw "git pull failed." }
 
@@ -147,6 +149,8 @@ if (Test-Path ".venv") {
     Write-Host "Removing incomplete/old virtual environment safely..." -ForegroundColor DarkYellow
     Remove-VenvSafely ".venv"
 }
+
+Clear-PythonTlsOverrides
 
 Write-Host "Creating Python 3.12 virtual environment..." -ForegroundColor Yellow
 if ($PythonCommand.Count -eq 2) {
@@ -158,25 +162,34 @@ if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed." }
 
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path $Py)) { throw "Virtual environment Python was not created at $Py" }
-
 Write-Host "Virtual environment ready: $Py" -ForegroundColor Green
 
-& $Py -m pip install --upgrade pip setuptools wheel
-if ($LASTEXITCODE -ne 0) { throw "pip bootstrap failed." }
+# Keep the pip bundled with Python 3.12. On Windows, self-upgrading pip inside the
+# freshly-created venv can transiently invalidate pip's vendored certifi bundle.
+& $Py -m pip --version
+if ($LASTEXITCODE -ne 0) { throw "Bundled pip is unavailable." }
 
+$PipCa = & $Py -c "import os, pip._vendor.certifi as c; p=c.where(); print(p); raise SystemExit(0 if os.path.isfile(p) else 2)"
+if ($LASTEXITCODE -ne 0) {
+    throw "Bundled pip CA certificate bundle is missing before dependency installation: $PipCa"
+}
+Write-Host "pip CA bundle verified: $PipCa" -ForegroundColor Green
+
+$env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+
+Write-Host "Installing runtime dependencies..." -ForegroundColor Yellow
 & $Py -m pip install -r requirements.txt
 if ($LASTEXITCODE -ne 0) { throw "requirements installation failed." }
 
+Write-Host "Installing development dependencies..." -ForegroundColor Yellow
 & $Py -m pip install -e ".[dev]"
 if ($LASTEXITCODE -ne 0) { throw "development dependencies installation failed." }
 
 Write-Host "=== Quality gates ===" -ForegroundColor Yellow
 & $Py -m ruff check src tests
 if ($LASTEXITCODE -ne 0) { throw "ruff failed." }
-
 & $Py -m pytest -q
 if ($LASTEXITCODE -ne 0) { throw "pytest failed." }
-
 & $Py -m compileall -q app.py src
 if ($LASTEXITCODE -ne 0) { throw "compileall failed." }
 
