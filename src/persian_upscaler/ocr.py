@@ -3,17 +3,19 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from time import perf_counter
 from typing import Any
 
 import cv2
 import numpy as np
 
-# PaddlePaddle 3.3.x can fail on Windows CPU when PIR and oneDNN are combined
-# for some OCR graphs. These flags must be set before importing PaddleOCR.
 os.environ.setdefault("FLAGS_enable_pir_api", "0")
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 from paddleocr import PaddleOCR
+
+MAX_OCR_PIXELS = 4_000_000
+MAX_OCR_SIDE = 2600
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,7 @@ class OCRResult:
     average_confidence: float
     lines: tuple[tuple[str, float], ...]
     pass_name: str = "default"
+    elapsed_seconds: float = 0.0
 
 
 def _find_payload(node: Any) -> dict[str, Any] | None:
@@ -41,20 +44,34 @@ def _find_payload(node: Any) -> dict[str, Any] | None:
 
 
 def _normalize_inference_image(image: np.ndarray) -> np.ndarray:
-    """PaddleOCR detection expects an HxWxC image even after OCR preprocessing."""
     if image is None or image.size == 0:
         raise ValueError("تصویر OCR معتبر نیست.")
     if image.ndim == 2:
-        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    if image.ndim != 3:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif image.ndim != 3:
         raise ValueError("ساختار تصویر OCR پشتیبانی نمی‌شود.")
-    channels = image.shape[2]
-    if channels == 1:
-        return cv2.cvtColor(image[:, :, 0], cv2.COLOR_GRAY2BGR)
-    if channels == 4:
-        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-    if channels != 3:
-        raise ValueError(f"تعداد کانال‌های OCR پشتیبانی نمی‌شود: {channels}")
+    else:
+        channels = image.shape[2]
+        if channels == 1:
+            image = cv2.cvtColor(image[:, :, 0], cv2.COLOR_GRAY2BGR)
+        elif channels == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        elif channels != 3:
+            raise ValueError(f"تعداد کانال‌های OCR پشتیبانی نمی‌شود: {channels}")
+
+    height, width = image.shape[:2]
+    pixels = height * width
+    side_scale = min(1.0, MAX_OCR_SIDE / max(height, width))
+    pixel_scale = min(1.0, (MAX_OCR_PIXELS / max(1, pixels)) ** 0.5)
+    scale = min(side_scale, pixel_scale)
+
+    if scale < 0.999:
+        image = cv2.resize(
+            image,
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
     return image
 
 
@@ -71,7 +88,6 @@ def _ordered_indices(payload: dict[str, Any], count: int) -> list[int]:
     if array.ndim != 2 or array.shape[0] != count or array.shape[1] < 4:
         return list(range(count))
 
-    # Reading order for Persian documents: top to bottom, and right to left within a line.
     heights = np.maximum(1.0, array[:, 3] - array[:, 1])
     median_height = float(np.median(heights)) if count else 1.0
     line_quantum = max(8.0, median_height * 0.65)
@@ -95,12 +111,23 @@ def get_ocr(device: str = "cpu") -> PaddleOCR:
         enable_mkldnn=False,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
-        use_textline_orientation=True,
+        use_textline_orientation=False,
     )
 
 
-def recognize(image: np.ndarray, device: str = "cpu", pass_name: str = "default") -> OCRResult:
+def recognize(
+    image: np.ndarray,
+    device: str = "cpu",
+    pass_name: str = "default",
+) -> OCRResult:
+    started = perf_counter()
     inference_image = _normalize_inference_image(image)
+    height, width = inference_image.shape[:2]
+    print(
+        f"[OCR] start pass={pass_name} size={width}x{height}",
+        flush=True,
+    )
+
     results = get_ocr(device).predict(inference_image)
     lines: list[tuple[str, float]] = []
 
@@ -112,19 +139,25 @@ def recognize(image: np.ndarray, device: str = "cpu", pass_name: str = "default"
         scores = payload.get("rec_scores") or []
         order = _ordered_indices(payload, len(texts))
         for index in order:
-            text = texts[index]
-            cleaned = str(text).strip()
+            cleaned = str(texts[index]).strip()
             if not cleaned:
                 continue
             score = float(scores[index]) if index < len(scores) else 0.0
             lines.append((cleaned, score))
 
     average = sum(score for _, score in lines) / len(lines) if lines else 0.0
+    elapsed = perf_counter() - started
+    print(
+        f"[OCR] done pass={pass_name} lines={len(lines)} "
+        f"confidence={average:.4f} elapsed={elapsed:.2f}s",
+        flush=True,
+    )
     return OCRResult(
         text="\n".join(text for text, _ in lines),
         average_confidence=average,
         lines=tuple(lines),
         pass_name=pass_name,
+        elapsed_seconds=elapsed,
     )
 
 
@@ -138,12 +171,17 @@ def recognize_best(
     candidates: list[tuple[str, np.ndarray]],
     device: str = "cpu",
 ) -> OCRResult:
-    """Run complementary document views and retain the strongest OCR result."""
     if not candidates:
         raise ValueError("هیچ ورودی OCR برای ارزیابی وجود ندارد.")
 
-    results = [
-        recognize(image, device=device, pass_name=name)
-        for name, image in candidates
-    ]
-    return max(results, key=_quality_key)
+    total_started = perf_counter()
+    results: list[OCRResult] = []
+    for name, image in candidates:
+        results.append(recognize(image, device=device, pass_name=name))
+
+    best = max(results, key=_quality_key)
+    print(
+        f"[OCR] selected pass={best.pass_name} total={perf_counter() - total_started:.2f}s",
+        flush=True,
+    )
+    return best
