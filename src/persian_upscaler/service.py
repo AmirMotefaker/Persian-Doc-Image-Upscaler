@@ -4,8 +4,6 @@ import json
 import tempfile
 from pathlib import Path
 
-import cv2
-
 from .enhancement import prepare_for_ocr, restore_visual
 from .io import load_image, save_png
 from .ocr import recognize
