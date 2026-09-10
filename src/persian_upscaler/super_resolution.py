@@ -95,19 +95,18 @@ def _edge_safe_blend(source: np.ndarray, sr_image: np.ndarray, scale: int) -> np
     """Keep learned SR in smooth areas while protecting high-contrast text geometry."""
     height, width = source.shape[:2]
     target_size = (width * scale, height * scale)
-    reference = cv2.resize(source, target_size, interpolation=cv2.INTER_LANCZOS4)
+    reference = cv2.resize(source, target_size, interpolation=cv2.INTER_CUBIC)
 
     gray = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY)
     lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
     edge = np.abs(lap)
-    edge = cv2.GaussianBlur(edge, (0, 0), 1.15)
-    percentile = float(np.percentile(edge, 88.0))
+    edge = cv2.GaussianBlur(edge, (0, 0), 1.0)
+    percentile = float(np.percentile(edge, 90.0))
     denom = max(8.0, percentile)
     mask = np.clip(edge / denom, 0.0, 1.0)
-    mask = cv2.GaussianBlur(mask, (0, 0), 0.7)
+    mask = cv2.GaussianBlur(mask, (0, 0), 0.65)
 
-    # On text/table edges prefer the geometrically faithful Lanczos reference.
-    reference_weight = (0.18 + 0.50 * mask)[..., None]
+    reference_weight = (0.10 + 0.28 * mask)[..., None]
     blended = (
         sr_image.astype(np.float32) * (1.0 - reference_weight)
         + reference.astype(np.float32) * reference_weight
@@ -116,15 +115,29 @@ def _edge_safe_blend(source: np.ndarray, sr_image: np.ndarray, scale: int) -> np
 
 
 def _finish(image: np.ndarray) -> np.ndarray:
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    """Document-safe finishing: denoise, local contrast, then bounded edge sharpening."""
+    denoised = cv2.bilateralFilter(image, 5, 22, 22)
+
+    lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
     lightness = lab[:, :, 0]
-    local = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(10, 10)).apply(lightness)
-    lab[:, :, 0] = cv2.addWeighted(lightness, 0.68, local, 0.32, 0)
+    local = cv2.createCLAHE(clipLimit=1.85, tileGridSize=(8, 8)).apply(lightness)
+    boosted = cv2.addWeighted(lightness, 0.48, local, 0.52, 0)
+    lab[:, :, 0] = boosted
     enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-    blur = cv2.GaussianBlur(enhanced, (0, 0), 0.62)
-    enhanced = cv2.addWeighted(enhanced, 1.10, blur, -0.10, 0)
-    return cv2.bilateralFilter(enhanced, 3, 14, 14)
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    edge_strength = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
+    edge_strength = cv2.GaussianBlur(edge_strength, (0, 0), 0.8)
+    threshold = max(10.0, float(np.percentile(edge_strength, 72.0)))
+    edge_mask = np.clip(edge_strength / threshold, 0.0, 1.0)
+    edge_mask = cv2.GaussianBlur(edge_mask, (0, 0), 0.55)[..., None]
+
+    blur = cv2.GaussianBlur(enhanced, (0, 0), 0.9)
+    detail = enhanced.astype(np.float32) - blur.astype(np.float32)
+    sharpened = enhanced.astype(np.float32) + detail * 0.78 * edge_mask
+    sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+
+    return cv2.detailEnhance(sharpened, sigma_s=5, sigma_r=0.08)
 
 
 def super_resolve_visual(image: np.ndarray, scale: float = 4.0) -> np.ndarray:
