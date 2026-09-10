@@ -25,7 +25,7 @@ def test_process_image_grayscale_file_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(
         service,
         "super_resolve_visual",
-        lambda image, scale=2.0: np.repeat(
+        lambda image, scale=2.0, profile="سند": np.repeat(
             np.repeat(image, 2, axis=0),
             2,
             axis=1,
