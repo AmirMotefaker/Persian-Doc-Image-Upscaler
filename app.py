@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import sys
 import tempfile
 from pathlib import Path
@@ -22,33 +23,35 @@ PROFILE_CHOICES = {
 TEXT = {
     "fa": {
         "brand": "دقیق‌خوان",
-        "tagline": "افزایش کیفیت تصویر و OCR فارسی",
-        "headline": "افزایش کیفیت تصویر فارسی",
-        "sub": "تصویر را بارگذاری کن، تبدیل را بزن، نتیجه و متن دقیق را همان‌جا بگیر.",
-        "upload": "تصویر را اینجا رها کنید یا کلیک کنید",
-        "sample": "نمونه",
+        "tagline": "افزایش کیفیت تصویر و OCR دقیق فارسی",
+        "headline": "تصویر فارسی را واضح‌تر کن",
+        "sub": "یک تصویر بارگذاری کن؛ خروجی HD و متن فارسی ساختاریافته تحویل بگیر.",
+        "upload": "تصویر را بکش و اینجا رها کن یا کلیک کن",
+        "sample": "نمونه اسکن",
         "profile": "نوع تصویر",
-        "format": "فرمت خروجی",
-        "action": "تبدیل و بهبود تصویر",
+        "action": "افزایش کیفیت و استخراج متن",
         "compare": "قبل / بعد",
         "text": "متن استخراج‌شده",
-        "download_image": "دریافت تصویر",
+        "download_image": "دریافت تصویر HD",
         "download_text": "دریافت متن",
+        "ready": "آماده",
+        "empty": "بعد از پردازش، متن فارسی اینجا نمایش داده می‌شود.",
     },
     "en": {
         "brand": "DaqiqKhan",
         "tagline": "Persian image enhancement & OCR",
-        "headline": "Persian Image Upscaler",
-        "sub": "Upload, enhance, and get the exact extracted text in one screen.",
-        "upload": "Drop image here or click to upload",
-        "sample": "Sample",
+        "headline": "Make Persian images clearer",
+        "sub": "Upload once; get an HD image and structured Persian text.",
+        "upload": "Drag & drop an image or click to browse",
+        "sample": "Scan sample",
         "profile": "Image type",
-        "format": "Output format",
-        "action": "Enhance & Convert",
+        "action": "Enhance image & extract text",
         "compare": "Before / After",
         "text": "Extracted text",
-        "download_image": "Download image",
+        "download_image": "Download HD image",
         "download_text": "Download text",
+        "ready": "Ready",
+        "empty": "Extracted Persian text will appear here.",
     },
 }
 
@@ -120,8 +123,7 @@ def _header(language: str) -> str:
         f"<div class='header' dir='{direction}'>"
         "<div class='brand'><span class='logo'>د</span><div>"
         f"<strong>{t['brand']}</strong><small>{t['tagline']}</small></div></div>"
-        "<div class='engine-dot'><i></i>OCR</div>"
-        "</div>"
+        f"<div class='status'><i></i>{t['ready']}</div></div>"
     )
 
 
@@ -135,25 +137,42 @@ def _hero(language: str) -> str:
     )
 
 
-def run_single(image_path, profile, output_format, language, progress=gr.Progress()):
+def _render_text(text: str, language: str) -> str:
+    direction = "ltr" if language == "en" else "rtl"
+    if not text.strip():
+        text = TEXT[language]["empty"]
+    escaped = html.escape(text)
+    return (
+        f"<div class='ocr-output' dir='{direction}'>"
+        f"<pre>{escaped}</pre></div>"
+    )
+
+
+def run_single(image_path, profile, language, progress=gr.Progress()):
     if not image_path:
         raise gr.Error(
             "Please upload an image." if language == "en" else "لطفاً یک تصویر بارگذاری کنید."
         )
+
+    progress(0.05, desc="Preparing")
     try:
-        progress(0.05, desc="Preparing")
         enhanced, _ocr_preview, canonical_text, text_file = process_image(
             str(image_path),
             profile=profile,
-            scale=2.0,
+            scale=4.0,
             language=language,
-            output_format=output_format,
+            output_format="PNG",
             engine="Super-Resolution Pro",
         )
         progress(0.92, desc="Preparing result")
         comparison = _comparison_pair(str(image_path), enhanced)
         progress(1.0, desc="Done")
-        return comparison, canonical_text, enhanced, text_file
+        return (
+            comparison,
+            _render_text(canonical_text, language),
+            enhanced,
+            text_file,
+        )
     except Exception as exc:
         prefix = "Processing failed" if language == "en" else "پردازش ناموفق بود"
         raise gr.Error(f"{prefix}: {exc}") from exc
@@ -161,86 +180,85 @@ def run_single(image_path, profile, output_format, language, progress=gr.Progres
 
 def localize(language: str):
     t = TEXT[language]
-    text_class = ["ltr"] if language == "en" else ["rtl"]
     return (
         gr.HTML(value=_header(language)),
         gr.HTML(value=_hero(language)),
         gr.Image(label=t["upload"]),
         gr.Button(value=t["sample"]),
         gr.Radio(choices=PROFILE_CHOICES[language], label=t["profile"]),
-        gr.Radio(label=t["format"]),
         gr.Button(value=t["action"]),
         gr.ImageSlider(label=t["compare"]),
-        gr.Textbox(label=t["text"], elem_classes=text_class),
-        gr.File(label=t["download_image"]),
-        gr.File(label=t["download_text"]),
+        gr.HTML(value=_render_text("", language)),
+        gr.DownloadButton(label=t["download_image"]),
+        gr.DownloadButton(label=t["download_text"]),
     )
 
 
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Vazirmatn:wght@400;500;600;700;800&display=swap');
-html,body{height:100%;margin:0;overflow:hidden!important;background:#0b1220}
+:root{--bg:#08111e;--panel:#0d1a2b;--panel2:#101f34;--border:rgba(148,163,184,.14);--muted:#94a3b8;--text:#f8fafc;--accent:#14b8a6;--accent2:#22d3ee}
+body[data-theme='light']{--bg:#f5f7fb;--panel:#fff;--panel2:#f8fafc;--border:rgba(15,23,42,.12);--muted:#64748b;--text:#0f172a;--accent:#0f766e;--accent2:#0891b2}
+html,body{height:100%;margin:0;overflow:hidden!important;background:var(--bg)!important;color:var(--text)!important}
 body,.gradio-container{font-family:'Vazirmatn','Inter',Tahoma,Arial,sans-serif!important}
-.gradio-container{max-width:1320px!important;width:100%!important;height:100dvh!important;margin:0 auto!important;padding:8px 14px 10px!important;overflow:hidden!important;box-sizing:border-box!important}
+.gradio-container{max-width:1480px!important;width:100%!important;height:100dvh!important;margin:0 auto!important;padding:8px 18px 12px!important;overflow:hidden!important;box-sizing:border-box!important;background:var(--bg)!important}
 footer,.footer,.built-with{display:none!important}
-#header{height:46px!important;margin:0!important;overflow:hidden!important}.header{height:46px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:9px}.brand strong{display:block;font-size:1rem}.brand small{display:block;font-size:.61rem;opacity:.5}.logo{width:34px;height:34px;display:grid;place-items:center;border-radius:10px;background:linear-gradient(135deg,#0891b2,#14b8a6);color:#fff;font-weight:800;font-size:18px}.engine-dot{display:flex;align-items:center;gap:6px;border:1px solid rgba(34,197,94,.22);padding:5px 9px;border-radius:999px;font-size:.64rem;opacity:.8}.engine-dot i{width:6px;height:6px;border-radius:50%;background:#22c55e}
-#hero{height:70px!important;overflow:hidden!important}.hero{text-align:center;padding:2px 0}.hero h1{font-size:1.5rem;line-height:1.45;margin:0;font-weight:800;color:#67e8f9}.hero p{font-size:.7rem;opacity:.55;margin:3px 0 0}
-#top-controls{position:absolute!important;top:14px!important;left:14px!important;width:150px!important;height:34px!important;z-index:50!important;gap:6px!important}#top-controls button{min-height:32px!important;height:32px!important;padding:0 10px!important}
-#workspace{height:calc(100dvh - 134px)!important;min-height:0!important;gap:18px!important;align-items:stretch!important;overflow:hidden!important;margin:0!important}
-#result-panel{height:100%!important;min-height:0!important;display:flex!important;flex-direction:column!important;gap:8px!important;overflow:hidden!important}
-#compare{flex:1 1 auto!important;min-height:0!important;height:auto!important;border:1px solid rgba(148,163,184,.14)!important;border-radius:18px!important;overflow:hidden!important;background:#111827!important;box-shadow:0 20px 50px rgba(0,0,0,.18)!important}#compare>div{height:100%!important;min-height:0!important}
-#result-bottom{flex:0 0 26%!important;min-height:0!important;gap:8px!important;margin:0!important}#text-box{height:100%!important;min-height:0!important}#text-box textarea{height:calc(100% - 30px)!important;min-height:82px!important;resize:none!important;font-family:'Vazirmatn',monospace!important;white-space:pre!important}#downloads{height:100%!important;display:flex!important;flex-direction:column!important;gap:6px!important}#downloads>div{flex:1!important;min-height:0!important;overflow:hidden!important}
-#control-panel{height:100%!important;min-height:0!important;display:flex!important;flex-direction:column!important;gap:8px!important;border:1px solid rgba(34,211,238,.18)!important;background:#0f1a2c!important;border-radius:22px!important;padding:12px!important;box-shadow:0 24px 60px rgba(0,0,0,.2)!important;overflow:hidden!important}.card-title{text-align:center;font-size:.9rem;font-weight:800;color:#cffafe;padding:2px 0 4px}
-#input{flex:1 1 auto!important;min-height:230px!important;border:1.5px dashed rgba(34,211,238,.42)!important;border-radius:16px!important;overflow:hidden!important;background:#0b1526!important}#input>div{height:100%!important;min-height:0!important}#input img{object-fit:contain!important}
-#sample button{height:32px!important;min-height:32px!important;border-radius:9px!important;font-size:.7rem!important}#profile,#format{margin:0!important}#profile label,#format label{font-size:.7rem!important}
-#action button{height:58px!important;min-height:58px!important;border-radius:14px!important;font-size:1rem!important;font-weight:800!important;background:linear-gradient(90deg,#0891b2,#14b8a6)!important;border:none!important;box-shadow:0 10px 28px rgba(20,184,166,.2)!important}
-.rtl,.rtl textarea,.rtl input{direction:rtl!important;text-align:right!important}.ltr,.ltr textarea,.ltr input{direction:ltr!important;text-align:left!important;font-family:'Inter',sans-serif!important}
-@media(max-width:980px){html,body{overflow:auto!important}.gradio-container{height:auto!important;min-height:100dvh!important;overflow:visible!important;padding:10px!important}#workspace{height:auto!important;flex-wrap:wrap!important}#result-panel,#control-panel{height:auto!important;overflow:visible!important}#compare{height:360px!important}#result-bottom{min-height:240px!important}#top-controls{position:static!important;width:auto!important}}
+#header{height:48px!important;overflow:hidden!important;margin:0!important}.header{height:48px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:10px}.brand strong{display:block;font-size:1.02rem}.brand small{display:block;font-size:.63rem;color:var(--muted)}.logo{width:36px;height:36px;display:grid;place-items:center;border-radius:11px;background:linear-gradient(135deg,var(--accent2),var(--accent));color:#fff;font-weight:800;font-size:18px}.status{display:flex;align-items:center;gap:6px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.07);padding:5px 9px;border-radius:999px;font-size:.66rem}.status i{width:6px;height:6px;border-radius:50%;background:#22c55e}
+#top{height:70px!important;min-height:70px!important;margin:0 0 6px!important;align-items:center!important}.hero{text-align:center}.hero h1{font-size:1.65rem;line-height:1.35;margin:0;font-weight:800;background:linear-gradient(90deg,var(--accent2),var(--accent));-webkit-background-clip:text;color:transparent}.hero p{font-size:.75rem;color:var(--muted);margin:4px 0 0}.mini-controls{display:flex;gap:6px!important}
+#workspace{height:calc(100dvh - 144px)!important;min-height:0!important;gap:18px!important;align-items:stretch!important;overflow:hidden!important}.panel{height:100%!important;min-height:0!important;box-sizing:border-box!important;overflow:hidden!important}
+#result{display:flex!important;flex-direction:column!important;gap:9px!important}.result-shell{height:100%!important;min-height:0!important;border:1px solid var(--border)!important;background:var(--panel)!important;border-radius:20px!important;padding:10px!important;box-sizing:border-box!important;display:flex!important;flex-direction:column!important;gap:8px!important}
+#compare{flex:1 1 auto!important;min-height:0!important;border-radius:15px!important;overflow:hidden!important;background:var(--panel2)!important}#compare>div{height:100%!important;min-height:0!important}
+#result-bottom{flex:0 0 24%!important;min-height:0!important;gap:8px!important;margin:0!important}.ocr-wrap{height:100%!important;min-height:0!important;border:1px solid var(--border)!important;background:var(--panel2)!important;border-radius:13px!important;padding:9px!important;overflow:auto!important}.ocr-output{height:100%;overflow:auto}.ocr-output pre{margin:0;white-space:pre-wrap;tab-size:8;font-family:'Vazirmatn','Inter',sans-serif;font-size:.78rem;line-height:1.75;color:var(--text)}#downloads{height:100%!important;display:flex!important;flex-direction:column!important;gap:7px!important}#downloads button{flex:1!important;min-height:40px!important;border-radius:11px!important}
+#controls{display:flex!important;flex-direction:column!important;gap:9px!important;border:1px solid var(--border)!important;background:var(--panel)!important;border-radius:20px!important;padding:14px!important}.upload-head{text-align:center;font-size:.94rem;font-weight:800;margin:1px 0 2px}.upload-sub{text-align:center;font-size:.67rem;color:var(--muted);margin-bottom:2px}
+#input{flex:1 1 auto!important;min-height:265px!important;border:1.5px dashed color-mix(in srgb,var(--accent2) 55%,transparent)!important;border-radius:16px!important;overflow:hidden!important;background:var(--panel2)!important}#input>div{height:100%!important;min-height:0!important}#input img{object-fit:contain!important}#sample button{height:34px!important;min-height:34px!important;border-radius:10px!important;font-size:.72rem!important}#profile{margin:0!important}#action button{height:60px!important;min-height:60px!important;border-radius:14px!important;font-size:1rem!important;font-weight:800!important;background:linear-gradient(90deg,var(--accent2),var(--accent))!important;border:none!important;box-shadow:0 10px 30px rgba(20,184,166,.2)!important}.trust{text-align:center;font-size:.64rem;color:var(--muted);margin-top:1px}
+@media(max-width:980px){html,body{overflow:auto!important}.gradio-container{height:auto!important;min-height:100dvh!important;overflow:visible!important;padding:10px!important}#workspace{height:auto!important;flex-wrap:wrap!important}.panel{height:auto!important;overflow:visible!important}#compare{height:360px!important}#result-bottom{min-height:230px!important}}
 """
 
 THEME_JS = """
 () => {
-  const light = document.body.dataset.theme !== 'light';
-  document.body.dataset.theme = light ? 'light' : 'dark';
-  document.body.style.background = light ? '#eef7f7' : '#0b1220';
+  const body = document.body;
+  body.dataset.theme = body.dataset.theme === 'light' ? 'dark' : 'light';
 }
 """
 
 with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
     header = gr.HTML(_header("fa"), elem_id="header")
-    hero = gr.HTML(_hero("fa"), elem_id="hero")
 
-    with gr.Row(elem_id="top-controls"):
-        language = gr.Dropdown(
-            choices=[("فارسی", "fa"), ("EN", "en")],
-            value="fa",
-            label=None,
-            show_label=False,
-            scale=3,
-        )
-        theme = gr.Button("☼", scale=1)
+    with gr.Row(elem_id="top"):
+        hero = gr.HTML(_hero("fa"), scale=8)
+        with gr.Row(scale=2, elem_classes=["mini-controls"]):
+            language = gr.Dropdown(
+                choices=[("فارسی", "fa"), ("English", "en")],
+                value="fa",
+                label=None,
+                show_label=False,
+            )
+            theme = gr.Button("◐")
 
     with gr.Row(elem_id="workspace"):
-        with gr.Column(scale=7, elem_id="result-panel"):
-            comparison = gr.ImageSlider(
-                label=TEXT["fa"]["compare"],
-                type="filepath",
-                interactive=False,
-                elem_id="compare",
-            )
-            with gr.Row(elem_id="result-bottom"):
-                output_text = gr.Textbox(
-                    lines=5,
-                    label=TEXT["fa"]["text"],
-                    elem_id="text-box",
-                    elem_classes=["rtl"],
+        with gr.Column(scale=8, elem_id="result", elem_classes=["panel"]):
+            with gr.Column(elem_classes=["result-shell"]):
+                comparison = gr.ImageSlider(
+                    label=TEXT["fa"]["compare"],
+                    type="filepath",
+                    interactive=False,
+                    elem_id="compare",
                 )
-                with gr.Column(elem_id="downloads"):
-                    enhanced_file = gr.File(label=TEXT["fa"]["download_image"])
-                    text_file = gr.File(label=TEXT["fa"]["download_text"])
+                with gr.Row(elem_id="result-bottom"):
+                    with gr.Column(scale=7, elem_classes=["ocr-wrap"]):
+                        text_html = gr.HTML(_render_text("", "fa"))
+                    with gr.Column(scale=3, elem_id="downloads"):
+                        image_download = gr.DownloadButton(
+                            TEXT["fa"]["download_image"]
+                        )
+                        text_download = gr.DownloadButton(
+                            TEXT["fa"]["download_text"]
+                        )
 
-        with gr.Column(scale=5, elem_id="control-panel"):
-            gr.HTML("<div class='card-title'>تصویر فارسی را بارگذاری کنید</div>")
+        with gr.Column(scale=5, elem_id="controls", elem_classes=["panel"]):
+            gr.HTML(
+                "<div class='upload-head'>تصویر فارسی را بارگذاری کنید</div>"
+                "<div class='upload-sub'>PNG · JPG · JPEG · WEBP · BMP · TIFF</div>"
+            )
             input_image = gr.Image(
                 type="filepath",
                 sources=["upload", "clipboard"],
@@ -254,23 +272,21 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                 label=TEXT["fa"]["profile"],
                 elem_id="profile",
             )
-            output_format = gr.Radio(
-                ["PNG", "JPG", "WEBP"],
-                value="PNG",
-                label=TEXT["fa"]["format"],
-                elem_id="format",
-            )
             process_button = gr.Button(
                 TEXT["fa"]["action"],
                 variant="primary",
                 elem_id="action",
             )
+            gr.HTML(
+                "<div class='trust'>پردازش محلی · OCR فارسی · خروجی HD غیرمولد</div>"
+            )
 
     sample_button.click(fn=lambda: SAMPLE_SCAN, outputs=[input_image])
     process_button.click(
         fn=run_single,
-        inputs=[input_image, profile, output_format, language],
-        outputs=[comparison, output_text, enhanced_file, text_file],
+        inputs=[input_image, profile, language],
+        outputs=[comparison, text_html, image_download, text_download],
+        show_progress="full",
     )
     language.change(
         fn=localize,
@@ -281,16 +297,15 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
             input_image,
             sample_button,
             profile,
-            output_format,
             process_button,
             comparison,
-            output_text,
-            enhanced_file,
-            text_file,
+            text_html,
+            image_download,
+            text_download,
         ],
     )
     theme.click(fn=None, js=THEME_JS)
 
 if __name__ == "__main__":
-    print("[APP] starting one-screen workspace on http://127.0.0.1:7860", flush=True)
+    print("[APP] starting redesigned workspace on http://127.0.0.1:7860", flush=True)
     demo.queue(default_concurrency_limit=1).launch(css=CSS)
