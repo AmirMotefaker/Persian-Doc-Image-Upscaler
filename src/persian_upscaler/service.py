@@ -25,13 +25,19 @@ def process_image(
     scale: float = 2.0,
     language: str = "fa",
     output_format: str = "PNG",
+    engine: str = "Text-Safe Pro",
 ) -> tuple[str, str, str, str]:
     image = _stage("بارگذاری تصویر", "Image loading", language, lambda: load_image(file_path))
     restored = _stage(
         "بهبود کیفیت",
         "Image enhancement",
         language,
-        lambda: restore_visual(image, profile=profile, scale=scale),
+        lambda: restore_visual(
+            image,
+            profile=profile,
+            scale=scale,
+            engine=engine,
+        ),
     )
     ocr_input = _stage(
         "آماده‌سازی OCR",
@@ -46,8 +52,8 @@ def process_image(
         lambda: build_ocr_candidates(restored, profile=profile),
     )
     result = _stage(
-        "تشخیص چندمرحله‌ای متن فارسی",
-        "Multi-pass Persian text recognition",
+        "تشخیص متن فارسی",
+        "Persian text recognition",
         language,
         lambda: recognize_best(candidates),
     )
@@ -75,7 +81,11 @@ def process_image(
                 "text": result.text,
                 "average_confidence": result.average_confidence,
                 "selected_pass": result.pass_name,
-                "lines": [{"text": text, "confidence": score} for text, score in result.lines],
+                "engine": engine,
+                "lines": [
+                    {"text": text, "confidence": score}
+                    for text, score in result.lines
+                ],
             },
             ensure_ascii=False,
             indent=2,
@@ -85,15 +95,15 @@ def process_image(
 
     if language == "en":
         meta = (
-            f"Average OCR confidence: {result.average_confidence * 100:.2f}%\n"
+            f"OCR confidence: {result.average_confidence * 100:.2f}%\n"
             f"Recognized lines: {len(result.lines)}\n"
-            f"Selected OCR pass: {result.pass_name}"
+            f"Enhancement engine: {engine}"
         )
     else:
         meta = (
-            f"میانگین اطمینان OCR: {result.average_confidence * 100:.2f}%\n"
-            f"تعداد خطوط شناسایی‌شده: {len(result.lines)}\n"
-            f"بهترین مسیر OCR: {result.pass_name}"
+            f"اطمینان OCR: {result.average_confidence * 100:.2f}%\n"
+            f"تعداد خطوط: {len(result.lines)}\n"
+            f"موتور بهبود: {engine}"
         )
 
     summary = f"{result.text}\n\n{meta}"
@@ -106,6 +116,7 @@ def process_batch(
     scale: float = 2.0,
     language: str = "fa",
     output_format: str = "PNG",
+    engine: str = "Text-Safe Pro",
 ) -> tuple[str, str]:
     if not file_paths:
         raise ValueError("هیچ فایلی برای پردازش گروهی انتخاب نشده است.")
@@ -124,11 +135,14 @@ def process_batch(
                 scale=scale,
                 language=language,
                 output_format=output_format,
+                engine=engine,
             )
             source_name = Path(file_path).stem
-            archive.write(enhanced, arcname=f"{index:02d}-{source_name}{Path(enhanced).suffix}")
+            archive.write(
+                enhanced,
+                arcname=f"{index:02d}-{source_name}{Path(enhanced).suffix}",
+            )
             archive.write(text_file, arcname=f"{index:02d}-{source_name}.txt")
             report_lines.append(f"{index}. {Path(file_path).name}\n{summary}")
 
-    report = "\n\n".join(report_lines)
-    return str(zip_path), report
+    return str(zip_path), "\n\n".join(report_lines)
