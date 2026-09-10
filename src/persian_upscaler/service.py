@@ -53,7 +53,11 @@ def process_image(
             "Super-Resolution تصویر",
             "Visual super-resolution",
             language,
-            lambda: super_resolve_visual(image, scale=scale),
+            lambda: super_resolve_visual(
+                image,
+                scale=scale,
+                profile=profile,
+            ),
         )
     else:
         visual = _stage(
@@ -115,6 +119,7 @@ def process_image(
                 "average_confidence": result.average_confidence,
                 "selected_pass": result.pass_name,
                 "visual_engine": engine,
+                "profile": profile,
                 "lines": [
                     {"text": text, "confidence": score}
                     for text, score in result.lines
