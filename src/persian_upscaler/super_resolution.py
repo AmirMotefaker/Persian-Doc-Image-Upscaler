@@ -8,14 +8,19 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-MODEL_URL = (
+EDSR_URL = (
+    "https://raw.githubusercontent.com/Saafke/EDSR_Tensorflow/"
+    "master/models/EDSR_x4.pb"
+)
+EDSR_NAME = "EDSR_x4.pb"
+FSRCNN_URL = (
     "https://raw.githubusercontent.com/Saafke/FSRCNN_Tensorflow/"
     "master/models/FSRCNN_x2.pb"
 )
-MODEL_NAME = "FSRCNN_x2.pb"
+FSRCNN_NAME = "FSRCNN_x2.pb"
 
 
-def _model_path() -> Path:
+def _model_root() -> Path:
     root = Path(
         os.environ.get(
             "DAQIQKHAN_MODEL_DIR",
@@ -23,72 +28,130 @@ def _model_path() -> Path:
         )
     )
     root.mkdir(parents=True, exist_ok=True)
-    return root / MODEL_NAME
+    return root
 
 
-def _ensure_model() -> Path:
-    path = _model_path()
-    if path.is_file() and path.stat().st_size > 10_000:
+def _ensure_model(name: str, url: str, min_size: int) -> Path:
+    path = _model_root() / name
+    if path.is_file() and path.stat().st_size > min_size:
         return path
 
     tmp = path.with_suffix(".download")
-    print(f"[SR] downloading {MODEL_NAME}...", flush=True)
-    urllib.request.urlretrieve(MODEL_URL, tmp)
-    if not tmp.is_file() or tmp.stat().st_size <= 10_000:
+    tmp.unlink(missing_ok=True)
+    print(f"[SR] downloading {name}...", flush=True)
+    urllib.request.urlretrieve(url, tmp)
+    if not tmp.is_file() or tmp.stat().st_size <= min_size:
         tmp.unlink(missing_ok=True)
-        raise RuntimeError("فایل مدل Super-Resolution معتبر دانلود نشد.")
+        raise RuntimeError(f"مدل Super-Resolution معتبر دانلود نشد: {name}")
     tmp.replace(path)
     print(f"[SR] model ready: {path}", flush=True)
     return path
 
 
-@lru_cache(maxsize=1)
-def _engine():
+def _new_engine(model_path: Path, model: str, scale: int):
     if not hasattr(cv2, "dnn_superres"):
         raise RuntimeError(
             "ماژول OpenCV dnn_superres نصب نیست؛ requirements جدید را نصب کنید."
         )
     sr = cv2.dnn_superres.DnnSuperResImpl_create()
-    sr.readModel(str(_ensure_model()))
-    sr.setModel("fsrcnn", 2)
+    sr.readModel(str(model_path))
+    sr.setModel(model, scale)
     return sr
 
 
-def super_resolve_visual(image: np.ndarray, scale: float = 2.0) -> np.ndarray:
-    """Visual-only SR path. OCR never depends on these generated pixels."""
+@lru_cache(maxsize=1)
+def _edsr_engine():
+    return _new_engine(
+        _ensure_model(EDSR_NAME, EDSR_URL, 30_000_000),
+        "edsr",
+        4,
+    )
+
+
+@lru_cache(maxsize=1)
+def _fsrcnn_engine():
+    return _new_engine(
+        _ensure_model(FSRCNN_NAME, FSRCNN_URL, 10_000),
+        "fsrcnn",
+        2,
+    )
+
+
+def _ensure_bgr(image: np.ndarray) -> np.ndarray:
     if image is None or image.size == 0:
         raise ValueError("تصویر ورودی Super-Resolution معتبر نیست.")
     if image.ndim == 2:
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    elif image.ndim == 3 and image.shape[2] == 4:
-        image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-    elif image.ndim != 3 or image.shape[2] != 3:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.ndim != 3:
         raise ValueError("ساختار تصویر برای Super-Resolution پشتیبانی نمی‌شود.")
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    if image.shape[2] != 3:
+        raise ValueError("ساختار کانال‌های تصویر برای Super-Resolution پشتیبانی نمی‌شود.")
+    return image
 
-    upscaled = _engine().upsample(image)
 
-    # Keep the SR result crisp without strong halos around Persian dots/stems.
-    lab = cv2.cvtColor(upscaled, cv2.COLOR_BGR2LAB)
+def _edge_safe_blend(source: np.ndarray, sr_image: np.ndarray, scale: int) -> np.ndarray:
+    """Keep learned SR in smooth areas while protecting high-contrast text geometry."""
+    height, width = source.shape[:2]
+    target_size = (width * scale, height * scale)
+    reference = cv2.resize(source, target_size, interpolation=cv2.INTER_LANCZOS4)
+
+    gray = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY)
+    lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
+    edge = np.abs(lap)
+    edge = cv2.GaussianBlur(edge, (0, 0), 1.15)
+    percentile = float(np.percentile(edge, 88.0))
+    denom = max(8.0, percentile)
+    mask = np.clip(edge / denom, 0.0, 1.0)
+    mask = cv2.GaussianBlur(mask, (0, 0), 0.7)
+
+    # On text/table edges prefer the geometrically faithful Lanczos reference.
+    reference_weight = (0.18 + 0.50 * mask)[..., None]
+    blended = (
+        sr_image.astype(np.float32) * (1.0 - reference_weight)
+        + reference.astype(np.float32) * reference_weight
+    )
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _finish(image: np.ndarray) -> np.ndarray:
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     lightness = lab[:, :, 0]
-    local = cv2.createCLAHE(clipLimit=1.45, tileGridSize=(8, 8)).apply(lightness)
-    lab[:, :, 0] = cv2.addWeighted(lightness, 0.45, local, 0.55, 0)
-    upscaled = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    local = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(10, 10)).apply(lightness)
+    lab[:, :, 0] = cv2.addWeighted(lightness, 0.68, local, 0.32, 0)
+    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-    blur = cv2.GaussianBlur(upscaled, (0, 0), 0.7)
-    upscaled = cv2.addWeighted(upscaled, 1.14, blur, -0.14, 0)
+    blur = cv2.GaussianBlur(enhanced, (0, 0), 0.62)
+    enhanced = cv2.addWeighted(enhanced, 1.10, blur, -0.10, 0)
+    return cv2.bilateralFilter(enhanced, 3, 14, 14)
 
-    target_scale = max(1.0, float(scale))
-    if abs(target_scale - 2.0) > 0.01:
+
+def super_resolve_visual(image: np.ndarray, scale: float = 4.0) -> np.ndarray:
+    """High-quality visual SR; canonical OCR remains on a separate text-safe path."""
+    image = _ensure_bgr(image)
+    requested = max(1.0, float(scale))
+
+    try:
+        print("[SR] engine=EDSR x4", flush=True)
+        upscaled = _edsr_engine().upsample(image)
+        upscaled = _edge_safe_blend(image, upscaled, 4)
+        native_scale = 4.0
+    except Exception as exc:
+        print(f"[SR] EDSR unavailable, fallback=FSRCNN x2 reason={exc}", flush=True)
+        upscaled = _fsrcnn_engine().upsample(image)
+        upscaled = _edge_safe_blend(image, upscaled, 2)
+        native_scale = 2.0
+
+    upscaled = _finish(upscaled)
+
+    if abs(requested - native_scale) > 0.01:
         height, width = image.shape[:2]
         target = (
-            max(1, round(width * target_scale)),
-            max(1, round(height * target_scale)),
+            max(1, round(width * requested)),
+            max(1, round(height * requested)),
         )
-        interpolation = (
-            cv2.INTER_LANCZOS4
-            if target_scale > 2.0
-            else cv2.INTER_AREA
-        )
+        interpolation = cv2.INTER_LANCZOS4 if requested > native_scale else cv2.INTER_AREA
         upscaled = cv2.resize(upscaled, target, interpolation=interpolation)
 
     return upscaled
