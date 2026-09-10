@@ -91,72 +91,116 @@ def _ensure_bgr(image: np.ndarray) -> np.ndarray:
     return image
 
 
-def _edge_safe_blend(source: np.ndarray, sr_image: np.ndarray, scale: int) -> np.ndarray:
-    """Keep learned SR in smooth areas while protecting high-contrast text geometry."""
+def _document_reference(source: np.ndarray, scale: int) -> np.ndarray:
+    """Create a crisp, geometry-faithful reference for text and table edges."""
     height, width = source.shape[:2]
-    target_size = (width * scale, height * scale)
-    reference = cv2.resize(source, target_size, interpolation=cv2.INTER_CUBIC)
+    reference = cv2.resize(
+        source,
+        (width * scale, height * scale),
+        interpolation=cv2.INTER_LANCZOS4,
+    )
 
-    gray = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY)
-    lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
-    edge = np.abs(lap)
-    edge = cv2.GaussianBlur(edge, (0, 0), 1.0)
-    percentile = float(np.percentile(edge, 90.0))
-    denom = max(8.0, percentile)
-    mask = np.clip(edge / denom, 0.0, 1.0)
-    mask = cv2.GaussianBlur(mask, (0, 0), 0.65)
+    lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB)
+    lightness, a, b = cv2.split(lab)
+    denoised = cv2.fastNlMeansDenoising(lightness, None, 4, 7, 21)
+    local = cv2.createCLAHE(clipLimit=1.75, tileGridSize=(8, 8)).apply(denoised)
+    lightness = cv2.addWeighted(denoised, 0.38, local, 0.62, 0)
+    reference = cv2.cvtColor(cv2.merge((lightness, a, b)), cv2.COLOR_LAB2BGR)
 
-    reference_weight = (0.10 + 0.28 * mask)[..., None]
-    blended = (
+    # Multi-scale unsharp mask. Strong enough for screenshots/documents, but bounded.
+    blur_small = cv2.GaussianBlur(reference, (0, 0), 0.75)
+    detail_small = cv2.addWeighted(reference, 1.72, blur_small, -0.72, 0)
+    blur_large = cv2.GaussianBlur(detail_small, (0, 0), 1.8)
+    detail_large = cv2.addWeighted(detail_small, 1.18, blur_large, -0.18, 0)
+    return detail_large
+
+
+def _edge_mask(image: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = cv2.magnitude(gx, gy)
+    threshold = max(10.0, float(np.percentile(magnitude, 82.0)))
+    mask = np.clip(magnitude / threshold, 0.0, 1.0)
+    return cv2.GaussianBlur(mask, (0, 0), 0.8)
+
+
+def _hybrid_document_fusion(
+    source: np.ndarray,
+    sr_image: np.ndarray,
+    scale: int,
+) -> np.ndarray:
+    reference = _document_reference(source, scale)
+    mask = _edge_mask(reference)[..., None]
+
+    # Smooth regions use learned SR. Text/table edges favor the crisp reference.
+    reference_weight = 0.22 + (0.68 * mask)
+    fused = (
         sr_image.astype(np.float32) * (1.0 - reference_weight)
         + reference.astype(np.float32) * reference_weight
     )
-    return np.clip(blended, 0, 255).astype(np.uint8)
+    return np.clip(fused, 0, 255).astype(np.uint8)
 
 
-def _finish(image: np.ndarray) -> np.ndarray:
-    """Document-safe finishing: denoise, local contrast, then bounded edge sharpening."""
-    denoised = cv2.bilateralFilter(image, 5, 22, 22)
-
-    lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
-    lightness = lab[:, :, 0]
-    local = cv2.createCLAHE(clipLimit=1.85, tileGridSize=(8, 8)).apply(lightness)
-    boosted = cv2.addWeighted(lightness, 0.48, local, 0.52, 0)
-    lab[:, :, 0] = boosted
-    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-    edge_strength = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
-    edge_strength = cv2.GaussianBlur(edge_strength, (0, 0), 0.8)
-    threshold = max(10.0, float(np.percentile(edge_strength, 72.0)))
-    edge_mask = np.clip(edge_strength / threshold, 0.0, 1.0)
-    edge_mask = cv2.GaussianBlur(edge_mask, (0, 0), 0.55)[..., None]
-
-    blur = cv2.GaussianBlur(enhanced, (0, 0), 0.9)
-    detail = enhanced.astype(np.float32) - blur.astype(np.float32)
-    sharpened = enhanced.astype(np.float32) + detail * 0.78 * edge_mask
-    sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
-
-    return cv2.detailEnhance(sharpened, sigma_s=5, sigma_r=0.08)
+def _natural_fusion(source: np.ndarray, sr_image: np.ndarray, scale: int) -> np.ndarray:
+    height, width = source.shape[:2]
+    reference = cv2.resize(
+        source,
+        (width * scale, height * scale),
+        interpolation=cv2.INTER_LANCZOS4,
+    )
+    mask = _edge_mask(reference)[..., None]
+    reference_weight = 0.14 + (0.42 * mask)
+    fused = (
+        sr_image.astype(np.float32) * (1.0 - reference_weight)
+        + reference.astype(np.float32) * reference_weight
+    )
+    return np.clip(fused, 0, 255).astype(np.uint8)
 
 
-def super_resolve_visual(image: np.ndarray, scale: float = 4.0) -> np.ndarray:
-    """High-quality visual SR; canonical OCR remains on a separate text-safe path."""
+def _finish(image: np.ndarray, profile: str) -> np.ndarray:
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    lightness, a, b = cv2.split(lab)
+    clip = 1.65 if profile in {"سند", "اسکن ضعیف"} else 1.35
+    local = cv2.createCLAHE(clipLimit=clip, tileGridSize=(10, 10)).apply(lightness)
+    mix = 0.46 if profile in {"سند", "اسکن ضعیف"} else 0.30
+    lightness = cv2.addWeighted(lightness, 1.0 - mix, local, mix, 0)
+    enhanced = cv2.cvtColor(cv2.merge((lightness, a, b)), cv2.COLOR_LAB2BGR)
+
+    sigma = 0.72 if profile in {"سند", "اسکن ضعیف"} else 0.62
+    amount = 0.22 if profile in {"سند", "اسکن ضعیف"} else 0.10
+    blur = cv2.GaussianBlur(enhanced, (0, 0), sigma)
+    enhanced = cv2.addWeighted(enhanced, 1.0 + amount, blur, -amount, 0)
+    return enhanced
+
+
+def super_resolve_visual(
+    image: np.ndarray,
+    scale: float = 4.0,
+    profile: str = "سند",
+) -> np.ndarray:
+    """Profile-aware visual SR; OCR remains on its independent text-safe path."""
     image = _ensure_bgr(image)
     requested = max(1.0, float(scale))
 
     try:
-        print("[SR] engine=EDSR x4", flush=True)
+        print(f"[SR] engine=EDSR x4 profile={profile}", flush=True)
         upscaled = _edsr_engine().upsample(image)
-        upscaled = _edge_safe_blend(image, upscaled, 4)
         native_scale = 4.0
+        if profile in {"سند", "اسکن ضعیف"}:
+            upscaled = _hybrid_document_fusion(image, upscaled, 4)
+        else:
+            upscaled = _natural_fusion(image, upscaled, 4)
     except Exception as exc:
         print(f"[SR] EDSR unavailable, fallback=FSRCNN x2 reason={exc}", flush=True)
         upscaled = _fsrcnn_engine().upsample(image)
-        upscaled = _edge_safe_blend(image, upscaled, 2)
         native_scale = 2.0
+        if profile in {"سند", "اسکن ضعیف"}:
+            upscaled = _hybrid_document_fusion(image, upscaled, 2)
+        else:
+            upscaled = _natural_fusion(image, upscaled, 2)
 
-    upscaled = _finish(upscaled)
+    upscaled = _finish(upscaled, profile)
 
     if abs(requested - native_scale) > 0.01:
         height, width = image.shape[:2]
