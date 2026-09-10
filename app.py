@@ -23,30 +23,34 @@ TEXT = {
     "fa": {
         "brand": "دقیق‌خوان",
         "tagline": "بهبود تصویر و OCR فارسی",
-        "headline": "تصویر فارسی را واضح کن؛ متن را دقیق بگیر",
-        "upload": "تصویر را اینجا رها کنید یا کلیک کنید",
-        "sample": "نمونه آماده",
+        "headline": "افزایش کیفیت تصویر فارسی",
+        "sub": "تصویر را بارگذاری کنید، کیفیت را بالا ببرید و متن فارسی را استخراج کنید.",
+        "upload": "تصویر را اینجا رها کنید یا برای انتخاب کلیک کنید",
+        "sample": "استفاده از تصویر نمونه",
         "profile": "نوع تصویر",
-        "action": "تبدیل و بهبود فایل",
+        "format": "فرمت خروجی",
+        "action": "تبدیل و بهبود تصویر",
         "compare": "قبل / بعد",
         "text": "متن استخراج‌شده",
         "download_image": "دریافت تصویر",
         "download_text": "دریافت متن",
-        "ready": "آماده",
+        "ready": "موتور فارسی آماده",
     },
     "en": {
         "brand": "DaqiqKhan",
         "tagline": "Persian image enhancement & OCR",
-        "headline": "Enhance Persian images and extract text",
+        "headline": "Persian Image Upscaler",
+        "sub": "Upload an image, enhance it, and extract Persian text.",
         "upload": "Drop an image here or click to browse",
-        "sample": "Try sample",
+        "sample": "Use sample image",
         "profile": "Image type",
+        "format": "Output format",
         "action": "Enhance & Convert",
         "compare": "Before / After",
         "text": "Extracted text",
         "download_image": "Download image",
         "download_text": "Download text",
-        "ready": "Ready",
+        "ready": "Persian engine ready",
     },
 }
 
@@ -122,12 +126,18 @@ def _header(language: str) -> str:
     )
 
 
-def _headline(language: str) -> str:
+def _hero(language: str) -> str:
+    t = TEXT[language]
     direction = "ltr" if language == "en" else "rtl"
-    return f"<div class='headline' dir='{direction}'>{TEXT[language]['headline']}</div>"
+    return (
+        f"<div class='hero' dir='{direction}'>"
+        f"<h1>{t['headline']}</h1>"
+        f"<p>{t['sub']}</p>"
+        "</div>"
+    )
 
 
-def run_single(image_path, profile, language, progress=gr.Progress()):
+def run_single(image_path, profile, output_format, language, progress=gr.Progress()):
     if not image_path:
         raise gr.Error(
             "Please upload an image." if language == "en" else "لطفاً یک تصویر بارگذاری کنید."
@@ -139,7 +149,7 @@ def run_single(image_path, profile, language, progress=gr.Progress()):
             profile=profile,
             scale=2.0,
             language=language,
-            output_format="PNG",
+            output_format=output_format,
             engine="Text-Safe Pro",
         )
         progress(0.92, desc="Preparing result")
@@ -156,10 +166,11 @@ def localize(language: str):
     text_class = ["ltr"] if language == "en" else ["rtl"]
     return (
         gr.HTML(value=_header(language)),
-        gr.HTML(value=_headline(language)),
+        gr.HTML(value=_hero(language)),
         gr.Image(label=t["upload"]),
         gr.Button(value=t["sample"]),
         gr.Radio(choices=PROFILE_CHOICES[language], label=t["profile"]),
+        gr.Radio(label=t["format"]),
         gr.Button(value=t["action"]),
         gr.ImageSlider(label=t["compare"]),
         gr.Textbox(label=t["text"], elem_classes=text_class),
@@ -170,36 +181,50 @@ def localize(language: str):
 
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Vazirmatn:wght@400;500;600;700;800&display=swap');
-html,body{height:100%;margin:0;overflow:hidden!important;background:#081019}
+html,body{height:100%;margin:0;overflow:hidden!important;background:#09111f}
 body,.gradio-container{font-family:'Vazirmatn','Inter',Tahoma,Arial,sans-serif!important}
-.gradio-container{max-width:1480px!important;width:100%!important;height:100dvh!important;margin:0 auto!important;padding:8px 14px!important;overflow:hidden!important;box-sizing:border-box!important}
+.gradio-container{max-width:1420px!important;width:100%!important;height:100dvh!important;margin:0 auto!important;padding:8px 16px 12px!important;overflow:hidden!important;box-sizing:border-box!important}
 footer,.footer,.built-with{display:none!important}
-#header{height:46px!important;overflow:hidden!important;margin:0!important}.header{height:46px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:9px}.brand strong{display:block;font-size:1rem}.brand small{display:block;font-size:.62rem;opacity:.5}.logo{width:34px;height:34px;display:grid;place-items:center;border-radius:10px;background:linear-gradient(135deg,#06b6d4,#14b8a6);color:#fff;font-weight:800;font-size:18px}.status{display:flex;align-items:center;gap:6px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.07);padding:5px 9px;border-radius:999px;font-size:.66rem}.status i{width:6px;height:6px;border-radius:50%;background:#22c55e}
-#topbar{height:36px!important;min-height:36px!important;margin:0 0 5px!important;gap:8px!important;align-items:center!important}.headline{text-align:center;font-size:1.05rem;font-weight:800;color:#67e8f9;line-height:34px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#workspace{height:calc(100dvh - 103px)!important;min-height:0!important;gap:12px!important;align-items:stretch!important;overflow:hidden!important}.panel{height:100%!important;min-height:0!important;border:1px solid rgba(148,163,184,.14)!important;background:#0e1725!important;border-radius:18px!important;padding:10px!important;box-sizing:border-box!important;overflow:hidden!important}
-#result{display:flex!important;flex-direction:column!important;gap:8px!important}#compare{flex:1 1 auto!important;min-height:0!important;height:auto!important;border-radius:13px!important;overflow:hidden!important}#compare>div{height:100%!important;min-height:0!important}#bottom{flex:0 0 29%!important;min-height:0!important;gap:8px!important;margin:0!important}#text-box{height:100%!important;min-height:0!important}#text-box textarea{height:calc(100% - 30px)!important;min-height:90px!important;resize:none!important}#files{height:100%!important;min-height:0!important;display:flex!important;flex-direction:column!important;gap:6px!important}#files>div{flex:1!important;min-height:0!important;overflow:hidden!important}
-#controls{display:flex!important;flex-direction:column!important;gap:8px!important}#input{flex:1 1 auto!important;min-height:260px!important;border:1px dashed rgba(34,211,238,.42)!important;border-radius:14px!important;overflow:hidden!important}#input>div{height:100%!important;min-height:0!important}#input img{object-fit:contain!important}#sample button{height:34px!important;min-height:34px!important;border-radius:9px!important;font-size:.72rem!important}#profile{margin:0!important}#action button{height:56px!important;min-height:56px!important;border-radius:13px!important;font-size:1rem!important;font-weight:800!important;background:linear-gradient(90deg,#06b6d4,#14b8a6)!important;border:none!important;box-shadow:0 8px 28px rgba(6,182,212,.18)!important}.rtl,.rtl textarea,.rtl input{direction:rtl!important;text-align:right!important}.ltr,.ltr textarea,.ltr input{direction:ltr!important;text-align:left!important;font-family:'Inter',sans-serif!important}
-@media(max-width:980px){html,body{overflow:auto!important}.gradio-container{height:auto!important;min-height:100dvh!important;overflow:visible!important;padding:10px!important}#workspace{height:auto!important;flex-wrap:wrap!important}.panel{height:auto!important;overflow:visible!important}#compare{height:360px!important}#bottom{min-height:240px!important}}
+#header{height:48px!important;overflow:hidden!important;margin:0!important}.header{height:48px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:10px}.brand strong{display:block;font-size:1rem}.brand small{display:block;font-size:.63rem;opacity:.5}.logo{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff;font-weight:800;font-size:18px}.status{display:flex;align-items:center;gap:6px;border:1px solid rgba(34,197,94,.22);background:rgba(34,197,94,.07);padding:5px 9px;border-radius:999px;font-size:.66rem}.status i{width:6px;height:6px;border-radius:50%;background:#22c55e}
+#hero{height:84px!important;overflow:hidden!important}.hero{text-align:center;padding:5px 0 0}.hero h1{font-size:1.55rem;line-height:1.5;margin:0;font-weight:800;color:#c084fc}.hero p{font-size:.73rem;opacity:.56;margin:3px 0 0}
+#utility{height:34px!important;min-height:34px!important;margin:0 0 7px!important;gap:8px!important;align-items:center!important}
+#workspace{height:calc(100dvh - 193px)!important;min-height:0!important;gap:22px!important;align-items:stretch!important;overflow:hidden!important}
+.panel{height:100%!important;min-height:0!important;box-sizing:border-box!important;overflow:hidden!important}
+#result{display:flex!important;flex-direction:column!important;gap:9px!important;background:transparent!important;border:none!important;padding:0!important}
+#compare{flex:1 1 auto!important;min-height:0!important;height:auto!important;border-radius:18px!important;overflow:hidden!important;border:1px solid rgba(148,163,184,.14)!important;background:#111a2b!important;box-shadow:0 20px 55px rgba(0,0,0,.18)!important}#compare>div{height:100%!important;min-height:0!important}
+#result-bottom{flex:0 0 23%!important;min-height:0!important;gap:8px!important;margin:0!important}
+#text-box{height:100%!important;min-height:0!important;border-radius:14px!important}#text-box textarea{height:calc(100% - 30px)!important;min-height:80px!important;resize:none!important}
+#files{height:100%!important;min-height:0!important;display:flex!important;flex-direction:column!important;gap:6px!important}#files>div{flex:1!important;min-height:0!important;overflow:hidden!important}
+#controls{display:flex!important;flex-direction:column!important;gap:8px!important;border:1px solid rgba(139,92,246,.22)!important;background:#101a2d!important;border-radius:22px!important;padding:14px!important;box-shadow:0 24px 60px rgba(0,0,0,.22)!important}
+#upload-title{height:44px!important;min-height:44px!important;margin:0!important;display:flex!important;align-items:center!important;justify-content:center!important;font-size:.9rem!important;font-weight:800!important;color:#e9d5ff!important}
+#input{flex:1 1 auto!important;min-height:235px!important;border:1.5px dashed rgba(168,85,247,.48)!important;border-radius:17px!important;overflow:hidden!important;background:#0c1526!important}#input>div{height:100%!important;min-height:0!important}#input img{object-fit:contain!important}
+#sample button{height:34px!important;min-height:34px!important;border-radius:10px!important;font-size:.72rem!important}
+#profile,#format{margin:0!important}
+#action button{height:58px!important;min-height:58px!important;border-radius:14px!important;font-size:1rem!important;font-weight:800!important;background:linear-gradient(90deg,#7c3aed,#a855f7)!important;border:none!important;box-shadow:0 10px 30px rgba(124,58,237,.25)!important}
+#trust{height:24px!important;min-height:24px!important;margin:0!important;text-align:center!important;font-size:.64rem!important;opacity:.52!important}
+.rtl,.rtl textarea,.rtl input{direction:rtl!important;text-align:right!important}.ltr,.ltr textarea,.ltr input{direction:ltr!important;text-align:left!important;font-family:'Inter',sans-serif!important}
+@media(max-width:980px){html,body{overflow:auto!important}.gradio-container{height:auto!important;min-height:100dvh!important;overflow:visible!important;padding:10px!important}#workspace{height:auto!important;flex-wrap:wrap!important}.panel{height:auto!important;overflow:visible!important}#compare{height:360px!important}#result-bottom{min-height:220px!important}}
 """
 
 THEME_JS = """
 () => {
   const light = document.body.dataset.theme !== 'light';
   document.body.dataset.theme = light ? 'light' : 'dark';
-  document.body.style.background = light ? '#eef4f6' : '#081019';
+  document.body.style.background = light ? '#f5f3ff' : '#09111f';
 }
 """
 
 with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
     header = gr.HTML(_header("fa"), elem_id="header")
-    with gr.Row(elem_id="topbar"):
-        headline = gr.HTML(_headline("fa"), scale=7)
+    hero = gr.HTML(_hero("fa"), elem_id="hero")
+
+    with gr.Row(elem_id="utility"):
         language = gr.Dropdown(
             choices=[("فارسی", "fa"), ("English", "en")],
             value="fa",
             label=None,
             show_label=False,
-            scale=2,
+            scale=4,
         )
         theme = gr.Button("☼", scale=1)
 
@@ -211,9 +236,9 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                 interactive=False,
                 elem_id="compare",
             )
-            with gr.Row(elem_id="bottom"):
+            with gr.Row(elem_id="result-bottom"):
                 output_text = gr.Textbox(
-                    lines=5,
+                    lines=4,
                     label=TEXT["fa"]["text"],
                     elem_id="text-box",
                     elem_classes=["rtl"],
@@ -222,7 +247,8 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                     enhanced_file = gr.File(label=TEXT["fa"]["download_image"])
                     text_file = gr.File(label=TEXT["fa"]["download_text"])
 
-        with gr.Column(scale=4, elem_id="controls", elem_classes=["panel"]):
+        with gr.Column(scale=5, elem_id="controls", elem_classes=["panel"]):
+            gr.HTML("<div id='upload-title'>تصویر فارسی را بارگذاری کنید</div>")
             input_image = gr.Image(
                 type="filepath",
                 sources=["upload", "clipboard"],
@@ -236,16 +262,23 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                 label=TEXT["fa"]["profile"],
                 elem_id="profile",
             )
+            output_format = gr.Radio(
+                ["PNG", "JPG", "WEBP"],
+                value="PNG",
+                label=TEXT["fa"]["format"],
+                elem_id="format",
+            )
             process_button = gr.Button(
                 TEXT["fa"]["action"],
                 variant="primary",
                 elem_id="action",
             )
+            gr.HTML("<div id='trust'>پردازش امن · مخصوص متن فارسی · خروجی بدون واترمارک</div>")
 
     sample_button.click(fn=lambda: SAMPLE_SCAN, outputs=[input_image])
     process_button.click(
         fn=run_single,
-        inputs=[input_image, profile, language],
+        inputs=[input_image, profile, output_format, language],
         outputs=[comparison, output_text, enhanced_file, text_file],
     )
     language.change(
@@ -253,10 +286,11 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
         inputs=[language],
         outputs=[
             header,
-            headline,
+            hero,
             input_image,
             sample_button,
             profile,
+            output_format,
             process_button,
             comparison,
             output_text,
@@ -267,5 +301,5 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
     theme.click(fn=None, js=THEME_JS)
 
 if __name__ == "__main__":
-    print("[APP] starting V9 minimal workspace on http://127.0.0.1:7860", flush=True)
+    print("[APP] starting V9 reference-inspired workspace on http://127.0.0.1:7860", flush=True)
     demo.queue(default_concurrency_limit=1).launch(css=CSS)
