@@ -27,6 +27,7 @@ class OCRResult:
     lines: tuple[tuple[str, float], ...]
     pass_name: str = "default"
     elapsed_seconds: float = 0.0
+    layout_text: str = ""
 
 
 def _find_payload(node: Any) -> dict[str, Any] | None:
@@ -77,17 +78,22 @@ def _normalize_inference_image(image: np.ndarray) -> np.ndarray:
     return image
 
 
-def _ordered_indices(payload: dict[str, Any], count: int) -> list[int]:
-    boxes = payload.get("rec_boxes")
-    if boxes is None:
-        return list(range(count))
-
+def _boxes(payload: dict[str, Any], count: int) -> np.ndarray | None:
+    raw = payload.get("rec_boxes")
+    if raw is None:
+        return None
     try:
-        array = np.asarray(boxes, dtype=float)
+        array = np.asarray(raw, dtype=float)
     except (TypeError, ValueError):
-        return list(range(count))
-
+        return None
     if array.ndim != 2 or array.shape[0] != count or array.shape[1] < 4:
+        return None
+    return array[:, :4]
+
+
+def _ordered_indices(payload: dict[str, Any], count: int) -> list[int]:
+    array = _boxes(payload, count)
+    if array is None:
         return list(range(count))
 
     heights = np.maximum(1.0, array[:, 3] - array[:, 1])
@@ -102,6 +108,44 @@ def _ordered_indices(payload: dict[str, Any], count: int) -> list[int]:
         keyed.append((line_bucket, -right_x, index))
 
     return [item[2] for item in sorted(keyed)]
+
+
+def _layout_text(payload: dict[str, Any], texts: list[str]) -> str:
+    array = _boxes(payload, len(texts))
+    if array is None or not texts:
+        return "\n".join(text.strip() for text in texts if str(text).strip())
+
+    heights = np.maximum(1.0, array[:, 3] - array[:, 1])
+    median_height = float(np.median(heights))
+    row_tolerance = max(8.0, median_height * 0.72)
+
+    items: list[tuple[float, float, int]] = []
+    for index, box in enumerate(array):
+        center_y = float((box[1] + box[3]) / 2.0)
+        right_x = float(max(box[0], box[2]))
+        items.append((center_y, right_x, index))
+    items.sort(key=lambda item: item[0])
+
+    rows: list[list[tuple[float, int]]] = []
+    row_centers: list[float] = []
+    for center_y, right_x, index in items:
+        if not rows or abs(center_y - row_centers[-1]) > row_tolerance:
+            rows.append([(right_x, index)])
+            row_centers.append(center_y)
+        else:
+            rows[-1].append((right_x, index))
+            n = len(rows[-1])
+            row_centers[-1] = ((row_centers[-1] * (n - 1)) + center_y) / n
+
+    rendered: list[str] = []
+    for row in rows:
+        row.sort(key=lambda item: -item[0])
+        cells = [str(texts[index]).strip() for _, index in row]
+        cells = [cell for cell in cells if cell]
+        if not cells:
+            continue
+        rendered.append("\t".join(cells))
+    return "\n".join(rendered)
 
 
 @lru_cache(maxsize=2)
@@ -135,20 +179,24 @@ def recognize(
 
     results = get_ocr(device).predict(inference_image)
     lines: list[tuple[str, float]] = []
+    layout_parts: list[str] = []
 
     for result in results:
         payload = _find_payload(result.json)
         if not payload:
             continue
-        texts = payload.get("rec_texts") or []
+        texts = [str(value) for value in (payload.get("rec_texts") or [])]
         scores = payload.get("rec_scores") or []
         order = _ordered_indices(payload, len(texts))
         for index in order:
-            cleaned = str(texts[index]).strip()
+            cleaned = texts[index].strip()
             if not cleaned:
                 continue
             score = float(scores[index]) if index < len(scores) else 0.0
             lines.append((cleaned, score))
+        spatial = _layout_text(payload, texts)
+        if spatial:
+            layout_parts.append(spatial)
 
     average = sum(score for _, score in lines) / len(lines) if lines else 0.0
     elapsed = perf_counter() - started
@@ -157,12 +205,15 @@ def recognize(
         f"confidence={average:.4f} elapsed={elapsed:.2f}s",
         flush=True,
     )
+    plain_text = "\n".join(text for text, _ in lines)
+    layout_text = "\n".join(layout_parts).strip() or plain_text
     return OCRResult(
-        text="\n".join(text for text, _ in lines),
+        text=plain_text,
         average_confidence=average,
         lines=tuple(lines),
         pass_name=pass_name,
         elapsed_seconds=elapsed,
+        layout_text=layout_text,
     )
 
 
