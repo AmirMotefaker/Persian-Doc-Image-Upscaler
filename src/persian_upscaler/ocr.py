@@ -12,12 +12,14 @@ import numpy as np
 os.environ.setdefault("FLAGS_enable_pir_api", "0")
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
-from paddleocr import PaddleOCR
+from paddleocr import PaddleOCR, TextRecognition
 
 MAX_OCR_PIXELS = 1_500_000
 MAX_OCR_SIDE = 1600
 FALLBACK_CONFIDENCE = 0.72
 FALLBACK_MIN_LINES = 4
+REFINE_BELOW = 0.94
+MAX_REFINE_CROPS = 96
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,22 @@ def _find_payload(node: Any) -> dict[str, Any] | None:
     elif isinstance(node, (list, tuple)):
         for value in node:
             found = _find_payload(value)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_single_rec_payload(node: Any) -> dict[str, Any] | None:
+    if isinstance(node, dict):
+        if "rec_text" in node and "rec_score" in node:
+            return node
+        for value in node.values():
+            found = _find_single_rec_payload(value)
+            if found is not None:
+                return found
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            found = _find_single_rec_payload(value)
             if found is not None:
                 return found
     return None
@@ -110,42 +128,103 @@ def _ordered_indices(payload: dict[str, Any], count: int) -> list[int]:
     return [item[2] for item in sorted(keyed)]
 
 
+def _group_rows(array: np.ndarray) -> list[list[int]]:
+    heights = np.maximum(1.0, array[:, 3] - array[:, 1])
+    median_height = float(np.median(heights)) if len(array) else 1.0
+    tolerance = max(7.0, median_height * 0.58)
+
+    items = []
+    for index, box in enumerate(array):
+        center_y = float((box[1] + box[3]) / 2.0)
+        items.append((center_y, index))
+    items.sort(key=lambda item: item[0])
+
+    rows: list[list[int]] = []
+    centers: list[float] = []
+    for center_y, index in items:
+        best_row = None
+        best_distance = float("inf")
+        for row_index, row_center in enumerate(centers):
+            distance = abs(center_y - row_center)
+            if distance <= tolerance and distance < best_distance:
+                best_distance = distance
+                best_row = row_index
+        if best_row is None:
+            rows.append([index])
+            centers.append(center_y)
+        else:
+            rows[best_row].append(index)
+            members = rows[best_row]
+            centers[best_row] = float(
+                np.mean([(array[i, 1] + array[i, 3]) / 2.0 for i in members])
+            )
+
+    ordered_rows = sorted(
+        zip(centers, rows, strict=True),
+        key=lambda item: item[0],
+    )
+    return [row for _, row in ordered_rows]
+
+
 def _layout_text(payload: dict[str, Any], texts: list[str]) -> str:
     array = _boxes(payload, len(texts))
     if array is None or not texts:
         return "\n".join(text.strip() for text in texts if str(text).strip())
 
-    heights = np.maximum(1.0, array[:, 3] - array[:, 1])
-    median_height = float(np.median(heights))
-    row_tolerance = max(8.0, median_height * 0.72)
-
-    items: list[tuple[float, float, int]] = []
-    for index, box in enumerate(array):
-        center_y = float((box[1] + box[3]) / 2.0)
-        right_x = float(max(box[0], box[2]))
-        items.append((center_y, right_x, index))
-    items.sort(key=lambda item: item[0])
-
-    rows: list[list[tuple[float, int]]] = []
-    row_centers: list[float] = []
-    for center_y, right_x, index in items:
-        if not rows or abs(center_y - row_centers[-1]) > row_tolerance:
-            rows.append([(right_x, index)])
-            row_centers.append(center_y)
-        else:
-            rows[-1].append((right_x, index))
-            n = len(rows[-1])
-            row_centers[-1] = ((row_centers[-1] * (n - 1)) + center_y) / n
-
     rendered: list[str] = []
-    for row in rows:
-        row.sort(key=lambda item: -item[0])
-        cells = [str(texts[index]).strip() for _, index in row]
+    for row_indices in _group_rows(array):
+        row_indices.sort(key=lambda index: -float(max(array[index, 0], array[index, 2])))
+        cells = [str(texts[index]).strip() for index in row_indices]
         cells = [cell for cell in cells if cell]
-        if not cells:
-            continue
-        rendered.append("\t".join(cells))
+        if cells:
+            rendered.append("\t".join(cells))
     return "\n".join(rendered)
+
+
+def _prepare_crop(image: np.ndarray, box: np.ndarray) -> np.ndarray | None:
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = [int(round(value)) for value in box[:4]]
+    pad_x = max(2, int((x2 - x1) * 0.05))
+    pad_y = max(2, int((y2 - y1) * 0.18))
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(width, x2 + pad_x)
+    y2 = min(height, y2 + pad_y)
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+
+    crop_height, crop_width = crop.shape[:2]
+    target_height = 72
+    scale = max(1.0, target_height / max(1, crop_height))
+    if scale > 1.01:
+        crop = cv2.resize(
+            crop,
+            (max(1, round(crop_width * scale)), max(1, round(crop_height * scale))),
+            interpolation=cv2.INTER_LANCZOS4,
+        )
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    if float(np.std(gray)) < 45.0:
+        lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+        lab[:, :, 0] = cv2.createCLAHE(
+            clipLimit=1.8,
+            tileGridSize=(4, 4),
+        ).apply(lab[:, :, 0])
+        crop = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    return cv2.copyMakeBorder(
+        crop,
+        6,
+        6,
+        8,
+        8,
+        cv2.BORDER_CONSTANT,
+        value=(255, 255, 255),
+    )
 
 
 @lru_cache(maxsize=2)
@@ -161,10 +240,91 @@ def get_ocr(device: str = "cpu") -> PaddleOCR:
     )
 
 
+@lru_cache(maxsize=2)
+def get_crop_recognizer(device: str = "cpu") -> TextRecognition:
+    return TextRecognition(
+        model_name="arabic_PP-OCRv5_mobile_rec",
+        device=device,
+    )
+
+
 def warmup(device: str = "cpu") -> None:
     started = perf_counter()
     get_ocr(device)
     print(f"[OCR] model ready elapsed={perf_counter() - started:.2f}s", flush=True)
+
+
+def _refine_texts(
+    image: np.ndarray,
+    payload: dict[str, Any],
+    texts: list[str],
+    scores: list[float],
+    device: str,
+) -> tuple[list[str], list[float]]:
+    array = _boxes(payload, len(texts))
+    if array is None or not texts:
+        return texts, scores
+
+    selected: list[int] = []
+    crops: list[np.ndarray] = []
+    for index, score in enumerate(scores):
+        if len(selected) >= MAX_REFINE_CROPS:
+            break
+        if float(score) >= REFINE_BELOW and len(texts[index].strip()) > 2:
+            continue
+        crop = _prepare_crop(image, array[index])
+        if crop is None:
+            continue
+        selected.append(index)
+        crops.append(crop)
+
+    if not crops:
+        return texts, scores
+
+    started = perf_counter()
+    print(f"[OCR] crop-refine start count={len(crops)}", flush=True)
+    try:
+        refined_results = list(
+            get_crop_recognizer(device).predict(
+                input=crops,
+                batch_size=min(16, len(crops)),
+            )
+        )
+    except Exception as exc:
+        print(f"[OCR] crop-refine skipped reason={exc}", flush=True)
+        return texts, scores
+
+    refined_count = 0
+    for index, result in zip(selected, refined_results, strict=False):
+        payload_single = _find_single_rec_payload(result.json)
+        if not payload_single:
+            continue
+        candidate = str(payload_single.get("rec_text") or "").strip()
+        candidate_score = float(payload_single.get("rec_score") or 0.0)
+        if not candidate:
+            continue
+        original = texts[index].strip()
+        original_score = float(scores[index]) if index < len(scores) else 0.0
+
+        should_replace = (
+            candidate_score >= original_score + 0.012
+            or (
+                original_score < 0.72
+                and candidate_score >= original_score - 0.015
+                and len(candidate) >= max(1, len(original) - 1)
+            )
+        )
+        if should_replace:
+            texts[index] = candidate
+            scores[index] = candidate_score
+            refined_count += 1
+
+    print(
+        f"[OCR] crop-refine done replaced={refined_count} "
+        f"elapsed={perf_counter() - started:.2f}s",
+        flush=True,
+    )
+    return texts, scores
 
 
 def recognize(
@@ -186,14 +346,26 @@ def recognize(
         if not payload:
             continue
         texts = [str(value) for value in (payload.get("rec_texts") or [])]
-        scores = payload.get("rec_scores") or []
+        raw_scores = payload.get("rec_scores") or []
+        scores = [
+            float(raw_scores[index]) if index < len(raw_scores) else 0.0
+            for index in range(len(texts))
+        ]
+        texts, scores = _refine_texts(
+            inference_image,
+            payload,
+            texts,
+            scores,
+            device,
+        )
+
         order = _ordered_indices(payload, len(texts))
         for index in order:
             cleaned = texts[index].strip()
             if not cleaned:
                 continue
-            score = float(scores[index]) if index < len(scores) else 0.0
-            lines.append((cleaned, score))
+            lines.append((cleaned, scores[index]))
+
         spatial = _layout_text(payload, texts)
         if spatial:
             layout_parts.append(spatial)
