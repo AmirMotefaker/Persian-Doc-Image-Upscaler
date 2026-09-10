@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import zipfile
+from pathlib import Path
+
+from .enhancement import build_ocr_candidates, prepare_for_ocr, restore_visual
+from .io import load_image, save_image, save_png
+from .ocr import recognize_best
+from .super_resolution import super_resolve_visual
+
+
+def _stage(name_fa: str, name_en: str, language: str, fn):
+    try:
+        return fn()
+    except Exception as exc:
+        if language == "en":
+            raise RuntimeError(f"{name_en} failed: {exc}") from exc
+        raise RuntimeError(f"مرحله «{name_fa}» ناموفق بود: {exc}") from exc
+
+
+def process_image(
+    file_path: str,
+    profile: str,
+    scale: float = 2.0,
+    language: str = "fa",
+    output_format: str = "PNG",
+    engine: str = "Super-Resolution Pro",
+) -> tuple[str, str, str, str]:
+    image = _stage(
+        "بارگذاری تصویر",
+        "Image loading",
+        language,
+        lambda: load_image(file_path),
+    )
+
+    # OCR has an independent conservative path. It never reads generated SR pixels.
+    ocr_restored = _stage(
+        "بهبود امن متن برای OCR",
+        "Text-safe OCR enhancement",
+        language,
+        lambda: restore_visual(
+            image,
+            profile=profile,
+            scale=2.0,
+            engine="Text-Safe Pro",
+        ),
+    )
+
+    if engine == "Super-Resolution Pro":
+        visual = _stage(
+            "Super-Resolution تصویر",
+            "Visual super-resolution",
+            language,
+            lambda: super_resolve_visual(
+                image,
+                scale=scale,
+                profile=profile,
+            ),
+        )
+    else:
+        visual = _stage(
+            "بهبود کیفیت",
+            "Image enhancement",
+            language,
+            lambda: restore_visual(
+                image,
+                profile=profile,
+                scale=scale,
+                engine=engine,
+            ),
+        )
+
+    ocr_input = _stage(
+        "آماده‌سازی OCR",
+        "OCR preprocessing",
+        language,
+        lambda: prepare_for_ocr(ocr_restored, profile=profile),
+    )
+    candidates = _stage(
+        "ساخت نماهای OCR",
+        "OCR candidate generation",
+        language,
+        lambda: build_ocr_candidates(ocr_restored, profile=profile),
+    )
+    result = _stage(
+        "تشخیص متن فارسی",
+        "Persian text recognition",
+        language,
+        lambda: recognize_best(candidates),
+    )
+
+    canonical_text = result.layout_text.strip() or result.text.strip()
+
+    workdir = Path(tempfile.mkdtemp(prefix="persian-upscaler-"))
+    visual_path = _stage(
+        "ذخیره تصویر بهبودیافته",
+        "Saving enhanced image",
+        language,
+        lambda: save_image(workdir, "enhanced", visual, output_format),
+    )
+    ocr_preview_path = _stage(
+        "ذخیره نمای OCR",
+        "Saving OCR preview",
+        language,
+        lambda: save_png(workdir / "ocr-preprocessed.png", ocr_input),
+    )
+    text_path = workdir / "ocr.txt"
+    json_path = workdir / "ocr.json"
+
+    # The downloadable text is byte-for-byte the same canonical content shown in UI.
+    text_path.write_text(canonical_text, encoding="utf-8")
+    json_path.write_text(
+        json.dumps(
+            {
+                "text": canonical_text,
+                "plain_text": result.text,
+                "average_confidence": result.average_confidence,
+                "selected_pass": result.pass_name,
+                "visual_engine": engine,
+                "profile": profile,
+                "lines": [
+                    {"text": text, "confidence": score}
+                    for text, score in result.lines
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    return visual_path, ocr_preview_path, canonical_text, str(text_path)
+
+
+def process_batch(
+    file_paths: list[str],
+    profile: str,
+    scale: float = 2.0,
+    language: str = "fa",
+    output_format: str = "PNG",
+    engine: str = "Super-Resolution Pro",
+) -> tuple[str, str]:
+    if not file_paths:
+        raise ValueError("هیچ فایلی برای پردازش گروهی انتخاب نشده است.")
+    if len(file_paths) > 20:
+        raise ValueError("حداکثر ۲۰ تصویر در هر پردازش گروهی پشتیبانی می‌شود.")
+
+    batch_dir = Path(tempfile.mkdtemp(prefix="persian-upscaler-batch-"))
+    zip_path = batch_dir / "daqiqkhan-batch.zip"
+    report_lines: list[str] = []
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, file_path in enumerate(file_paths, start=1):
+            enhanced, _, text, text_file = process_image(
+                file_path,
+                profile=profile,
+                scale=scale,
+                language=language,
+                output_format=output_format,
+                engine=engine,
+            )
+            source_name = Path(file_path).stem
+            archive.write(
+                enhanced,
+                arcname=f"{index:02d}-{source_name}{Path(enhanced).suffix}",
+            )
+            archive.write(text_file, arcname=f"{index:02d}-{source_name}.txt")
+            report_lines.append(f"{index}. {Path(file_path).name}\n{text}")
+
+    return str(zip_path), "\n\n".join(report_lines)
