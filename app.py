@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -337,14 +336,11 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
     theme.click(fn=None, js=THEME_JS)
 
 if __name__ == "__main__":
+    print("[APP] starting blocking local server on http://127.0.0.1:7860", flush=True)
     demo.queue(default_concurrency_limit=1).launch(
         css=CSS,
-        prevent_thread_lock=True,
+        server_name="127.0.0.1",
+        server_port=7860,
+        prevent_thread_lock=False,
+        show_error=True,
     )
-    print("[APP] server started; press Ctrl+C to stop", flush=True)
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        print("\n[APP] shutting down", flush=True)
-        demo.close()
