@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -22,8 +23,9 @@ PROFILE_CHOICES = {
 TEXT = {
     "fa": {
         "brand": "دقیق‌خوان",
-        "tagline": "بهبود تصویر و OCR تخصصی فارسی",
-        "upload": "تصویر فارسی را اینجا رها کنید یا کلیک کنید",
+        "tagline": "بهبود کیفیت تصویر و OCR تخصصی فارسی",
+        "ready": "موتور فارسی آماده",
+        "upload": "تصویر را اینجا رها کنید یا کلیک کنید",
         "sample": "استفاده از نمونه اسکن",
         "profile": "نوع تصویر",
         "format": "فرمت خروجی",
@@ -34,14 +36,14 @@ TEXT = {
         "text": "متن استخراج‌شده",
         "download": "دریافت تصویر",
         "download_text": "دریافت متن",
-        "ready": "موتور فارسی آماده",
     },
     "en": {
         "brand": "DaqiqKhan",
         "tagline": "Persian Image Enhancement & OCR",
-        "upload": "Drop or click to upload a Persian text image",
+        "ready": "Persian engine ready",
+        "upload": "Drop an image here or click to browse",
         "sample": "Use scan sample",
-        "profile": "Image profile",
+        "profile": "Image type",
         "format": "Output format",
         "scale": "Upscale factor",
         "process": "Enhance image & extract text",
@@ -50,7 +52,6 @@ TEXT = {
         "text": "Extracted text",
         "download": "Download image",
         "download_text": "Download text",
-        "ready": "Persian engine ready",
     },
 }
 
@@ -65,6 +66,19 @@ def _brand(language: str) -> str:
         f"<div class='brand-tag'>{t['tagline']}</div></div></div>"
         f"<div class='ready'><i></i>{t['ready']}</div></div>"
     )
+
+
+def _comparison_pair(original_path: str, enhanced_path: str) -> tuple[str, str]:
+    workdir = Path(tempfile.mkdtemp(prefix="daqiqkhan-compare-"))
+    before_path = workdir / "before.png"
+    with Image.open(enhanced_path) as enhanced:
+        target_size = enhanced.size
+    with Image.open(original_path) as original:
+        original = original.convert("RGB")
+        if original.size != target_size:
+            original = original.resize(target_size, Image.Resampling.LANCZOS)
+        original.save(before_path, format="PNG")
+    return str(before_path), enhanced_path
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -82,60 +96,60 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+def _draw_right_aligned(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    *,
+    fill: int,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> None:
+    x, y = xy
+    bbox = draw.textbbox((0, 0), text, font=font)
+    width = bbox[2] - bbox[0]
+    draw.text((max(40, x - width), y), text, fill=fill, font=font)
+
+
 def _make_scan_sample() -> str:
     workdir = Path(tempfile.mkdtemp(prefix="daqiqkhan-sample-"))
-    path = workdir / "sample-scan.png"
-    canvas = Image.new("L", (1100, 700), 244)
+    path = workdir / "persian-scan-sample.png"
+    canvas = Image.new("L", (1180, 760), 242)
     draw = ImageDraw.Draw(canvas)
-    font = _font(28)
-    title = _font(38)
-    # Keep the fixture startup-safe on Pillow builds without libraqm.
-    rows = [
-        ("Persian OCR document sample", title),
-        ("Document No: 1405-06-18", font),
-        ("Commodity certificate - Persian text test", font),
-        ("Value: 27,000,000 IRR", font),
-        ("Low quality scan / OCR benchmark fixture", font),
+    title_font = _font(38)
+    text_font = _font(27)
+    lines = [
+        "نمونه سند فارسی برای ارزیابی کیفیت OCR",
+        "شماره سند: ۱۴۰۵-۰۶-۱۸     تاریخ ثبت: ۱۴۰۵/۰۶/۱۸",
+        "نام کالا: گواهی سپرده کالایی",
+        "مقدار: ۲۷٬۰۰۰٬۰۰۰ ریال",
+        "توضیحات: این تصویر شبیه یک اسکن کم‌کیفیت ساخته شده است.",
+        "هدف: بررسی حفظ نقطه‌ها، اعداد و فاصله‌های فارسی.",
     ]
     y = 85
-    for text, row_font in rows:
-        draw.text((90, y), text, fill=35, font=row_font)
-        y += 92
-    draw.rectangle((70, 560, 1030, 640), outline=115, width=2)
-    draw.text((95, 585), "Scan noise, blur and deskew test", fill=65, font=font)
-    canvas = canvas.filter(ImageFilter.GaussianBlur(radius=0.7))
+    for index, line in enumerate(lines):
+        font = title_font if index == 0 else text_font
+        _draw_right_aligned(draw, (1080, y), line, fill=28, font=font)
+        y += 92 if index == 0 else 78
+    canvas = canvas.filter(ImageFilter.GaussianBlur(radius=0.55))
     canvas = canvas.rotate(
-        0.4,
+        0.35,
         resample=Image.Resampling.BICUBIC,
         expand=False,
-        fillcolor=246,
+        fillcolor=245,
     )
-    canvas.save(path, format="PNG")
+    canvas.save(path, format="PNG", optimize=True)
     return str(path)
 
 
 SAMPLE_SCAN = _make_scan_sample()
 
 
-def _comparison_pair(original_path: str, enhanced_path: str) -> tuple[str, str]:
-    workdir = Path(tempfile.mkdtemp(prefix="daqiqkhan-compare-"))
-    before_path = workdir / "before.png"
-    with Image.open(enhanced_path) as enhanced:
-        target_size = enhanced.size
-    with Image.open(original_path) as original:
-        before = original.convert("RGB")
-        if before.size != target_size:
-            before = before.resize(target_size, Image.Resampling.LANCZOS)
-        before.save(before_path, format="PNG")
-    return str(before_path), enhanced_path
-
-
 def run_single(image_path, profile, scale, output_format, language):
     if not image_path:
         raise gr.Error(
-            "Please upload an image first."
+            "Please upload an image containing Persian text."
             if language == "en"
-            else "ابتدا یک تصویر بارگذاری کنید."
+            else "لطفاً یک تصویر دارای متن فارسی بارگذاری کنید."
         )
     try:
         enhanced, ocr_preview, summary, text_file = process_image(
@@ -323,4 +337,14 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
     theme.click(fn=None, js=THEME_JS)
 
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=1).launch(css=CSS)
+    demo.queue(default_concurrency_limit=1).launch(
+        css=CSS,
+        prevent_thread_lock=True,
+    )
+    print("[APP] server started; press Ctrl+C to stop", flush=True)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\n[APP] shutting down", flush=True)
+        demo.close()
