@@ -14,6 +14,7 @@ ESPCN_URL = (
     "master/models/ESPCN_x4.pb"
 )
 ESPCN_NAME = "ESPCN_x4.pb"
+DOCUMENT_PROFILES = {"سند", "اسکن ضعیف"}
 
 
 def _model_root() -> Path:
@@ -31,7 +32,6 @@ def _ensure_model() -> Path:
     path = _model_root() / ESPCN_NAME
     if path.is_file() and path.stat().st_size > 10_000:
         return path
-
     tmp = path.with_suffix(".download")
     tmp.unlink(missing_ok=True)
     print(f"[SR] downloading {ESPCN_NAME}...", flush=True)
@@ -56,11 +56,11 @@ def _engine():
 
 def _ensure_bgr(image: np.ndarray) -> np.ndarray:
     if image is None or image.size == 0:
-        raise ValueError("تصویر ورودی Super-Resolution معتبر نیست.")
+        raise ValueError("تصویر ورودی معتبر نیست.")
     if image.ndim == 2:
         return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     if image.ndim != 3:
-        raise ValueError("ساختار تصویر برای Super-Resolution پشتیبانی نمی‌شود.")
+        raise ValueError("ساختار تصویر پشتیبانی نمی‌شود.")
     if image.shape[2] == 4:
         return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
     if image.shape[2] != 3:
@@ -68,19 +68,17 @@ def _ensure_bgr(image: np.ndarray) -> np.ndarray:
     return image
 
 
-def _preclean_document(image: np.ndarray, profile: str) -> np.ndarray:
+def _normalize_document_luma(image: np.ndarray, weak_scan: bool) -> np.ndarray:
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     lightness, channel_a, channel_b = cv2.split(lab)
 
-    if profile in {"سند", "اسکن ضعیف"}:
-        lightness = cv2.fastNlMeansDenoising(lightness, None, 3, 7, 17)
-        clahe = cv2.createCLAHE(clipLimit=1.7, tileGridSize=(8, 8))
-        local = clahe.apply(lightness)
-        lightness = cv2.addWeighted(lightness, 0.45, local, 0.55, 0)
+    if weak_scan:
+        denoised = cv2.fastNlMeansDenoising(lightness, None, 4, 7, 19)
+        local = cv2.createCLAHE(clipLimit=1.50, tileGridSize=(8, 8)).apply(denoised)
+        lightness = cv2.addWeighted(denoised, 0.60, local, 0.40, 0)
     else:
-        clahe = cv2.createCLAHE(clipLimit=1.25, tileGridSize=(8, 8))
-        local = clahe.apply(lightness)
-        lightness = cv2.addWeighted(lightness, 0.72, local, 0.28, 0)
+        local = cv2.createCLAHE(clipLimit=1.18, tileGridSize=(10, 10)).apply(lightness)
+        lightness = cv2.addWeighted(lightness, 0.82, local, 0.18, 0)
 
     return cv2.cvtColor(
         cv2.merge((lightness, channel_a, channel_b)),
@@ -88,73 +86,57 @@ def _preclean_document(image: np.ndarray, profile: str) -> np.ndarray:
     )
 
 
-def _crisp_reference(image: np.ndarray, scale: int) -> np.ndarray:
-    height, width = image.shape[:2]
-    reference = cv2.resize(
-        image,
+def _edge_limited_unsharp(image: np.ndarray, amount: float) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = cv2.magnitude(grad_x, grad_y)
+    denom = max(20.0, float(np.percentile(magnitude, 92.0)))
+    mask = np.clip(magnitude / denom, 0.0, 1.0)
+    mask = cv2.GaussianBlur(mask, (0, 0), 1.0)[..., None]
+
+    blur = cv2.GaussianBlur(image, (0, 0), 0.85)
+    sharpened = cv2.addWeighted(image, 1.0 + amount, blur, -amount, 0)
+    mixed = (
+        image.astype(np.float32) * (1.0 - mask)
+        + sharpened.astype(np.float32) * mask
+    )
+    return np.clip(mixed, 0, 255).astype(np.uint8)
+
+
+def _document_restore(image: np.ndarray, scale: int, weak_scan: bool) -> np.ndarray:
+    """Geometry-preserving restoration for Persian text and tables.
+
+    Learned SR is intentionally avoided on document glyphs. It can invent strokes,
+    halos and dot shapes that make Persian text less readable and reduce OCR fidelity.
+    """
+    cleaned = _normalize_document_luma(image, weak_scan=weak_scan)
+    height, width = cleaned.shape[:2]
+    output = cv2.resize(
+        cleaned,
         (width * scale, height * scale),
         interpolation=cv2.INTER_LANCZOS4,
     )
 
-    blur1 = cv2.GaussianBlur(reference, (0, 0), 0.55)
-    sharp1 = cv2.addWeighted(reference, 1.55, blur1, -0.55, 0)
-    blur2 = cv2.GaussianBlur(sharp1, (0, 0), 1.35)
-    return cv2.addWeighted(sharp1, 1.10, blur2, -0.10, 0)
+    # Keep glyph edges intact: only a tiny denoise and edge-gated sharpening.
+    output = cv2.bilateralFilter(output, 3, 8, 8)
+    output = _edge_limited_unsharp(output, amount=0.16 if weak_scan else 0.12)
+    return output
 
 
-def _edge_mask(image: np.ndarray) -> np.ndarray:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    magnitude = cv2.magnitude(gx, gy)
-    denom = max(12.0, float(np.percentile(magnitude, 84.0)))
-    mask = np.clip(magnitude / denom, 0.0, 1.0)
-    return cv2.GaussianBlur(mask, (0, 0), 0.65)
-
-
-def _fuse_document(
-    source: np.ndarray,
-    learned: np.ndarray,
-    profile: str,
-) -> np.ndarray:
-    reference = _crisp_reference(source, 4)
-    mask = _edge_mask(reference)[..., None]
-
-    if profile in {"سند", "اسکن ضعیف"}:
-        # Persian glyph geometry and table edges prefer the deterministic path.
-        reference_weight = 0.35 + 0.58 * mask
-    else:
-        reference_weight = 0.18 + 0.35 * mask
-
-    fused = (
-        learned.astype(np.float32) * (1.0 - reference_weight)
-        + reference.astype(np.float32) * reference_weight
-    )
-    return np.clip(fused, 0, 255).astype(np.uint8)
-
-
-def _finalize(image: np.ndarray, profile: str) -> np.ndarray:
-    if profile in {"سند", "اسکن ضعیف"}:
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        lightness, channel_a, channel_b = cv2.split(lab)
-        local = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(12, 12)).apply(
-            lightness
+def _natural_ai_restore(image: np.ndarray) -> np.ndarray:
+    """Learned SR is reserved for non-document imagery."""
+    try:
+        print("[SR] engine=ESPCN x4 profile=natural", flush=True)
+        return _engine().upsample(image)
+    except Exception as exc:
+        print(f"[SR] ESPCN unavailable; fallback=Lanczos reason={exc}", flush=True)
+        height, width = image.shape[:2]
+        return cv2.resize(
+            image,
+            (width * 4, height * 4),
+            interpolation=cv2.INTER_LANCZOS4,
         )
-        lightness = cv2.addWeighted(lightness, 0.70, local, 0.30, 0)
-        image = cv2.cvtColor(
-            cv2.merge((lightness, channel_a, channel_b)),
-            cv2.COLOR_LAB2BGR,
-        )
-
-        blur = cv2.GaussianBlur(image, (0, 0), 0.48)
-        image = cv2.addWeighted(image, 1.20, blur, -0.20, 0)
-
-    return image
-
-
-def _fast_fallback(image: np.ndarray, profile: str) -> np.ndarray:
-    reference = _crisp_reference(image, 4)
-    return _finalize(reference, profile)
 
 
 def super_resolve_visual(
@@ -162,29 +144,26 @@ def super_resolve_visual(
     scale: float = 4.0,
     profile: str = "سند",
 ) -> np.ndarray:
-    """Fast interactive SR for Persian documents; OCR stays on its own path."""
+    """Fast, conservative output path for Persian documents."""
     started = perf_counter()
     image = _ensure_bgr(image)
-    cleaned = _preclean_document(image, profile)
-
-    try:
-        print(f"[SR] engine=ESPCN x4 profile={profile}", flush=True)
-        learned = _engine().upsample(cleaned)
-        output = _fuse_document(cleaned, learned, profile)
-    except Exception as exc:
-        print(f"[SR] lightweight AI unavailable; fast fallback reason={exc}", flush=True)
-        output = _fast_fallback(cleaned, profile)
-
-    output = _finalize(output, profile)
-
     requested = max(1.0, float(scale))
-    if abs(requested - 4.0) > 0.01:
+    native_scale = 4
+
+    if profile in DOCUMENT_PROFILES:
+        weak_scan = profile == "اسکن ضعیف"
+        print(f"[SR] engine=DocumentRestore x4 profile={profile}", flush=True)
+        output = _document_restore(image, native_scale, weak_scan=weak_scan)
+    else:
+        output = _natural_ai_restore(image)
+
+    if abs(requested - native_scale) > 0.01:
         height, width = image.shape[:2]
         target = (
             max(1, round(width * requested)),
             max(1, round(height * requested)),
         )
-        interpolation = cv2.INTER_LANCZOS4 if requested > 4.0 else cv2.INTER_AREA
+        interpolation = cv2.INTER_LANCZOS4 if requested > native_scale else cv2.INTER_AREA
         output = cv2.resize(output, target, interpolation=interpolation)
 
     print(
