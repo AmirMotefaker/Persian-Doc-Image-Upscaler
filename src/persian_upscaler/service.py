@@ -97,12 +97,14 @@ def process_image(
         meta = (
             f"OCR confidence: {result.average_confidence * 100:.2f}%\n"
             f"Recognized lines: {len(result.lines)}\n"
+            f"Selected OCR pass: {result.pass_name}\n"
             f"Enhancement engine: {engine}"
         )
     else:
         meta = (
             f"اطمینان OCR: {result.average_confidence * 100:.2f}%\n"
             f"تعداد خطوط: {len(result.lines)}\n"
+            f"بهترین مسیر OCR: {result.pass_name}\n"
             f"موتور بهبود: {engine}"
         )
 
