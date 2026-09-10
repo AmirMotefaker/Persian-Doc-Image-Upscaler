@@ -70,26 +70,29 @@ def _ensure_bgr(image: np.ndarray) -> np.ndarray:
 
 def _preclean_document(image: np.ndarray, profile: str) -> np.ndarray:
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
+    lightness, channel_a, channel_b = cv2.split(lab)
 
     if profile in {"سند", "اسکن ضعیف"}:
-        l = cv2.fastNlMeansDenoising(l, None, 3, 7, 17)
+        lightness = cv2.fastNlMeansDenoising(lightness, None, 3, 7, 17)
         clahe = cv2.createCLAHE(clipLimit=1.7, tileGridSize=(8, 8))
-        local = clahe.apply(l)
-        l = cv2.addWeighted(l, 0.45, local, 0.55, 0)
+        local = clahe.apply(lightness)
+        lightness = cv2.addWeighted(lightness, 0.45, local, 0.55, 0)
     else:
         clahe = cv2.createCLAHE(clipLimit=1.25, tileGridSize=(8, 8))
-        local = clahe.apply(l)
-        l = cv2.addWeighted(l, 0.72, local, 0.28, 0)
+        local = clahe.apply(lightness)
+        lightness = cv2.addWeighted(lightness, 0.72, local, 0.28, 0)
 
-    return cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+    return cv2.cvtColor(
+        cv2.merge((lightness, channel_a, channel_b)),
+        cv2.COLOR_LAB2BGR,
+    )
 
 
 def _crisp_reference(image: np.ndarray, scale: int) -> np.ndarray:
-    h, w = image.shape[:2]
+    height, width = image.shape[:2]
     reference = cv2.resize(
         image,
-        (w * scale, h * scale),
+        (width * scale, height * scale),
         interpolation=cv2.INTER_LANCZOS4,
     )
 
@@ -133,10 +136,15 @@ def _fuse_document(
 def _finalize(image: np.ndarray, profile: str) -> np.ndarray:
     if profile in {"سند", "اسکن ضعیف"}:
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        local = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(12, 12)).apply(l)
-        l = cv2.addWeighted(l, 0.70, local, 0.30, 0)
-        image = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+        lightness, channel_a, channel_b = cv2.split(lab)
+        local = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(12, 12)).apply(
+            lightness
+        )
+        lightness = cv2.addWeighted(lightness, 0.70, local, 0.30, 0)
+        image = cv2.cvtColor(
+            cv2.merge((lightness, channel_a, channel_b)),
+            cv2.COLOR_LAB2BGR,
+        )
 
         blur = cv2.GaussianBlur(image, (0, 0), 0.48)
         image = cv2.addWeighted(image, 1.20, blur, -0.20, 0)
@@ -171,8 +179,11 @@ def super_resolve_visual(
 
     requested = max(1.0, float(scale))
     if abs(requested - 4.0) > 0.01:
-        h, w = image.shape[:2]
-        target = (max(1, round(w * requested)), max(1, round(h * requested)))
+        height, width = image.shape[:2]
+        target = (
+            max(1, round(width * requested)),
+            max(1, round(height * requested)),
+        )
         interpolation = cv2.INTER_LANCZOS4 if requested > 4.0 else cv2.INTER_AREA
         output = cv2.resize(output, target, interpolation=interpolation)
 
