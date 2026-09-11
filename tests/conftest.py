@@ -10,5 +10,6 @@ if util.find_spec("paddleocr") is None:
             raise RuntimeError("PaddleOCR runtime is not installed in lightweight CI")
 
     paddleocr.PaddleOCR = _UnavailablePaddleRuntime
+    paddleocr.TextDetection = _UnavailablePaddleRuntime
     paddleocr.TextRecognition = _UnavailablePaddleRuntime
     sys.modules["paddleocr"] = paddleocr
