@@ -1,7 +1,7 @@
 from pathlib import Path
 
+import cv2
 import numpy as np
-from PIL import Image
 
 from persian_upscaler import service
 from persian_upscaler.ocr import OCRResult
@@ -9,7 +9,7 @@ from persian_upscaler.ocr import OCRResult
 
 def test_process_image_grayscale_file_end_to_end(tmp_path, monkeypatch):
     source = tmp_path / "grayscale.png"
-    Image.fromarray(np.full((48, 96), 235, dtype=np.uint8)).save(source)
+    assert cv2.imwrite(str(source), np.full((48, 96), 235, dtype=np.uint8))
 
     monkeypatch.setattr(
         service,
