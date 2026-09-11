@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import csv
+import io
 import os
+import shutil
+import subprocess
+import tempfile
+import urllib.request
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -16,10 +23,12 @@ from paddleocr import PaddleOCR, TextRecognition
 
 MAX_OCR_PIXELS = 1_500_000
 MAX_OCR_SIDE = 1600
-FALLBACK_CONFIDENCE = 0.72
-FALLBACK_MIN_LINES = 4
-REFINE_BELOW = 0.94
+REFINE_BELOW = 0.96
 MAX_REFINE_CROPS = 96
+MAX_PADDLE_PASSES = 2
+TESSERACT_TIMEOUT_SECONDS = 25
+TESSDATA_URL = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main"
+TESSDATA_LANGS = ("fas", "eng")
 
 
 @dataclass(frozen=True)
@@ -109,29 +118,10 @@ def _boxes(payload: dict[str, Any], count: int) -> np.ndarray | None:
     return array[:, :4]
 
 
-def _ordered_indices(payload: dict[str, Any], count: int) -> list[int]:
-    array = _boxes(payload, count)
-    if array is None:
-        return list(range(count))
-
-    heights = np.maximum(1.0, array[:, 3] - array[:, 1])
-    median_height = float(np.median(heights)) if count else 1.0
-    line_quantum = max(8.0, median_height * 0.65)
-
-    keyed: list[tuple[float, float, int]] = []
-    for index, box in enumerate(array):
-        center_y = float((box[1] + box[3]) / 2.0)
-        right_x = float(max(box[0], box[2]))
-        line_bucket = round(center_y / line_quantum)
-        keyed.append((line_bucket, -right_x, index))
-
-    return [item[2] for item in sorted(keyed)]
-
-
 def _group_rows(array: np.ndarray) -> list[list[int]]:
     heights = np.maximum(1.0, array[:, 3] - array[:, 1])
     median_height = float(np.median(heights)) if len(array) else 1.0
-    tolerance = max(7.0, median_height * 0.58)
+    tolerance = max(6.0, median_height * 0.58)
 
     items = []
     for index, box in enumerate(array):
@@ -159,10 +149,7 @@ def _group_rows(array: np.ndarray) -> list[list[int]]:
                 np.mean([(array[i, 1] + array[i, 3]) / 2.0 for i in members])
             )
 
-    ordered_rows = sorted(
-        zip(centers, rows, strict=True),
-        key=lambda item: item[0],
-    )
+    ordered_rows = sorted(zip(centers, rows, strict=True), key=lambda item: item[0])
     return [row for _, row in ordered_rows]
 
 
@@ -184,8 +171,8 @@ def _layout_text(payload: dict[str, Any], texts: list[str]) -> str:
 def _prepare_crop(image: np.ndarray, box: np.ndarray) -> np.ndarray | None:
     height, width = image.shape[:2]
     x1, y1, x2, y2 = [int(round(value)) for value in box[:4]]
-    pad_x = max(2, int((x2 - x1) * 0.05))
-    pad_y = max(2, int((y2 - y1) * 0.18))
+    pad_x = max(3, int((x2 - x1) * 0.07))
+    pad_y = max(3, int((y2 - y1) * 0.22))
     x1 = max(0, x1 - pad_x)
     y1 = max(0, y1 - pad_y)
     x2 = min(width, x2 + pad_x)
@@ -198,30 +185,29 @@ def _prepare_crop(image: np.ndarray, box: np.ndarray) -> np.ndarray | None:
         return None
 
     crop_height, crop_width = crop.shape[:2]
-    target_height = 72
+    target_height = 96
     scale = max(1.0, target_height / max(1, crop_height))
     if scale > 1.01:
         crop = cv2.resize(
             crop,
             (max(1, round(crop_width * scale)), max(1, round(crop_height * scale))),
-            interpolation=cv2.INTER_LANCZOS4,
+            interpolation=cv2.INTER_CUBIC,
         )
 
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    if float(np.std(gray)) < 45.0:
+    if float(np.std(gray)) < 50.0:
         lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
-        lab[:, :, 0] = cv2.createCLAHE(
-            clipLimit=1.8,
-            tileGridSize=(4, 4),
-        ).apply(lab[:, :, 0])
+        lab[:, :, 0] = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(4, 4)).apply(
+            lab[:, :, 0]
+        )
         crop = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
     return cv2.copyMakeBorder(
         crop,
-        6,
-        6,
         8,
         8,
+        12,
+        12,
         cv2.BORDER_CONSTANT,
         value=(255, 255, 255),
     )
@@ -251,7 +237,7 @@ def get_crop_recognizer(device: str = "cpu") -> TextRecognition:
 def warmup(device: str = "cpu") -> None:
     started = perf_counter()
     get_ocr(device)
-    print(f"[OCR] model ready elapsed={perf_counter() - started:.2f}s", flush=True)
+    print(f"[OCR] Paddle model ready elapsed={perf_counter() - started:.2f}s", flush=True)
 
 
 def _refine_texts(
@@ -270,7 +256,8 @@ def _refine_texts(
     for index, score in enumerate(scores):
         if len(selected) >= MAX_REFINE_CROPS:
             break
-        if float(score) >= REFINE_BELOW and len(texts[index].strip()) > 2:
+        text = texts[index].strip()
+        if float(score) >= REFINE_BELOW and len(text) > 3:
             continue
         crop = _prepare_crop(image, array[index])
         if crop is None:
@@ -307,10 +294,10 @@ def _refine_texts(
         original_score = float(scores[index]) if index < len(scores) else 0.0
 
         should_replace = (
-            candidate_score >= original_score + 0.012
+            candidate_score >= original_score + 0.01
             or (
-                original_score < 0.72
-                and candidate_score >= original_score - 0.015
+                original_score < 0.78
+                and candidate_score >= original_score - 0.02
                 and len(candidate) >= max(1, len(original) - 1)
             )
         )
@@ -335,7 +322,7 @@ def recognize(
     started = perf_counter()
     inference_image = _normalize_inference_image(image)
     height, width = inference_image.shape[:2]
-    print(f"[OCR] start pass={pass_name} size={width}x{height}", flush=True)
+    print(f"[OCR] Paddle start pass={pass_name} size={width}x{height}", flush=True)
 
     results = get_ocr(device).predict(inference_image)
     lines: list[tuple[str, float]] = []
@@ -359,12 +346,23 @@ def recognize(
             device,
         )
 
-        order = _ordered_indices(payload, len(texts))
-        for index in order:
-            cleaned = texts[index].strip()
-            if not cleaned:
-                continue
-            lines.append((cleaned, scores[index]))
+        array = _boxes(payload, len(texts))
+        if array is None:
+            for index, text in enumerate(texts):
+                cleaned = text.strip()
+                if cleaned:
+                    lines.append((cleaned, scores[index]))
+        else:
+            for row_indices in _group_rows(array):
+                row_indices.sort(
+                    key=lambda index: -float(max(array[index, 0], array[index, 2]))
+                )
+                row_cells = [texts[index].strip() for index in row_indices]
+                row_cells = [cell for cell in row_cells if cell]
+                if row_cells:
+                    row_text = "\t".join(row_cells)
+                    row_scores = [scores[index] for index in row_indices]
+                    lines.append((row_text, float(np.mean(row_scores))))
 
         spatial = _layout_text(payload, texts)
         if spatial:
@@ -372,13 +370,13 @@ def recognize(
 
     average = sum(score for _, score in lines) / len(lines) if lines else 0.0
     elapsed = perf_counter() - started
+    plain_text = "\n".join(text for text, _ in lines)
+    layout_text = "\n".join(layout_parts).strip() or plain_text
     print(
-        f"[OCR] done pass={pass_name} lines={len(lines)} "
+        f"[OCR] Paddle done pass={pass_name} lines={len(lines)} "
         f"confidence={average:.4f} elapsed={elapsed:.2f}s",
         flush=True,
     )
-    plain_text = "\n".join(text for text, _ in lines)
-    layout_text = "\n".join(layout_parts).strip() or plain_text
     return OCRResult(
         text=plain_text,
         average_confidence=average,
@@ -389,17 +387,192 @@ def recognize(
     )
 
 
-def _quality_key(result: OCRResult) -> tuple[float, int, int]:
-    useful_chars = sum(1 for char in result.text if not char.isspace())
-    confident_lines = sum(1 for _, score in result.lines if score >= 0.65)
-    return (round(result.average_confidence, 5), confident_lines, useful_chars)
+def _tesseract_executable() -> str | None:
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    for candidate in (
+        Path("C:/Program Files/Tesseract-OCR/tesseract.exe"),
+        Path("C:/Program Files (x86)/Tesseract-OCR/tesseract.exe"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
-def _needs_fallback(result: OCRResult) -> bool:
-    return (
-        result.average_confidence < FALLBACK_CONFIDENCE
-        or len(result.lines) < FALLBACK_MIN_LINES
+def _tessdata_root() -> Path:
+    root = Path.home() / ".cache" / "daqiqkhan" / "tessdata"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _ensure_tessdata() -> Path | None:
+    root = _tessdata_root()
+    try:
+        for lang in TESSDATA_LANGS:
+            target = root / f"{lang}.traineddata"
+            if target.is_file() and target.stat().st_size > 100_000:
+                continue
+            tmp = target.with_suffix(".download")
+            tmp.unlink(missing_ok=True)
+            print(f"[OCR] downloading Tesseract language={lang}", flush=True)
+            urllib.request.urlretrieve(
+                f"{TESSDATA_URL}/{lang}.traineddata",
+                tmp,
+            )
+            if not tmp.is_file() or tmp.stat().st_size <= 100_000:
+                tmp.unlink(missing_ok=True)
+                return None
+            tmp.replace(target)
+    except Exception as exc:
+        print(f"[OCR] Tesseract language data unavailable reason={exc}", flush=True)
+        return None
+    return root
+
+
+def _tesseract_once(image: np.ndarray, psm: int) -> OCRResult | None:
+    executable = _tesseract_executable()
+    if not executable:
+        return None
+    tessdata = _ensure_tessdata()
+    if tessdata is None:
+        return None
+
+    started = perf_counter()
+    with tempfile.TemporaryDirectory(prefix="daqiqkhan-tesseract-") as temp_dir:
+        image_path = Path(temp_dir) / "input.png"
+        if not cv2.imwrite(str(image_path), image):
+            return None
+        command = [
+            executable,
+            str(image_path),
+            "stdout",
+            "--tessdata-dir",
+            str(tessdata),
+            "-l",
+            "fas+eng",
+            "--oem",
+            "1",
+            "--psm",
+            str(psm),
+            "tsv",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=TESSERACT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[OCR] Tesseract skipped reason={exc}", flush=True)
+            return None
+
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return None
+
+    texts: list[str] = []
+    scores: list[float] = []
+    boxes: list[list[float]] = []
+    reader = csv.DictReader(io.StringIO(completed.stdout), delimiter="\t")
+    for row in reader:
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            confidence_raw = float(row.get("conf") or -1)
+            left = float(row.get("left") or 0)
+            top = float(row.get("top") or 0)
+            width = float(row.get("width") or 0)
+            height = float(row.get("height") or 0)
+        except ValueError:
+            continue
+        if confidence_raw < 0 or width <= 0 or height <= 0:
+            continue
+        texts.append(text)
+        scores.append(max(0.0, min(1.0, confidence_raw / 100.0)))
+        boxes.append([left, top, left + width, top + height])
+
+    if not texts:
+        return None
+
+    payload = {"rec_boxes": boxes}
+    array = np.asarray(boxes, dtype=float)
+    lines: list[tuple[str, float]] = []
+    for row_indices in _group_rows(array):
+        row_indices.sort(key=lambda index: -float(max(array[index, 0], array[index, 2])))
+        row_texts = [texts[index] for index in row_indices if texts[index]]
+        if not row_texts:
+            continue
+        row_score = float(np.mean([scores[index] for index in row_indices]))
+        lines.append(("\t".join(row_texts), row_score))
+
+    layout_text = _layout_text(payload, texts)
+    average = sum(score for _, score in lines) / len(lines) if lines else 0.0
+    elapsed = perf_counter() - started
+    print(
+        f"[OCR] Tesseract psm={psm} lines={len(lines)} "
+        f"confidence={average:.4f} elapsed={elapsed:.2f}s",
+        flush=True,
     )
+    return OCRResult(
+        text="\n".join(text for text, _ in lines),
+        average_confidence=average,
+        lines=tuple(lines),
+        pass_name=f"tesseract-psm{psm}",
+        elapsed_seconds=elapsed,
+        layout_text=layout_text,
+    )
+
+
+def _script_signal(text: str) -> float:
+    compact = [char for char in text if not char.isspace() and char not in "\t|_-—–.,:;،؛()[]{}"]
+    if not compact:
+        return 0.0
+    useful = 0
+    for char in compact:
+        code = ord(char)
+        if (
+            0x0600 <= code <= 0x06FF
+            or 0x0750 <= code <= 0x077F
+            or 0xFB50 <= code <= 0xFDFF
+            or 0xFE70 <= code <= 0xFEFF
+            or char.isdigit()
+            or ("A" <= char <= "Z")
+            or ("a" <= char <= "z")
+        ):
+            useful += 1
+    return useful / len(compact)
+
+
+def _quality_key(result: OCRResult) -> tuple[float, float, int, int]:
+    useful_chars = sum(1 for char in result.text if not char.isspace())
+    confident_lines = sum(1 for _, score in result.lines if score >= 0.60)
+    script_signal = _script_signal(result.text)
+    composite = (
+        result.average_confidence * 0.62
+        + script_signal * 0.28
+        + min(1.0, useful_chars / 80.0) * 0.10
+    )
+    return (round(composite, 5), round(result.average_confidence, 5), confident_lines, useful_chars)
+
+
+def _tesseract_candidates(image: np.ndarray) -> list[OCRResult]:
+    if not _tesseract_executable():
+        print("[OCR] Tesseract not installed; ensemble uses Paddle only", flush=True)
+        return []
+    results: list[OCRResult] = []
+    first = _tesseract_once(image, psm=6)
+    if first is not None:
+        results.append(first)
+    if first is None or len(first.lines) < 4 or first.average_confidence < 0.60:
+        sparse = _tesseract_once(image, psm=11)
+        if sparse is not None:
+            results.append(sparse)
+    return results
 
 
 def recognize_best(
@@ -410,23 +583,18 @@ def recognize_best(
         raise ValueError("هیچ ورودی OCR برای ارزیابی وجود ندارد.")
 
     total_started = perf_counter()
-    first_name, first_image = candidates[0]
-    results = [recognize(first_image, device=device, pass_name=first_name)]
+    results: list[OCRResult] = []
 
-    if len(candidates) > 1 and _needs_fallback(results[0]):
-        second_name, second_image = candidates[1]
-        print(
-            f"[OCR] fallback enabled confidence={results[0].average_confidence:.4f} "
-            f"lines={len(results[0].lines)}",
-            flush=True,
-        )
-        results.append(recognize(second_image, device=device, pass_name=second_name))
-    elif len(candidates) > 1:
-        print("[OCR] fallback skipped", flush=True)
+    for pass_name, image in candidates[:MAX_PADDLE_PASSES]:
+        results.append(recognize(image, device=device, pass_name=pass_name))
+
+    results.extend(_tesseract_candidates(_normalize_inference_image(candidates[0][1])))
 
     best = max(results, key=_quality_key)
     print(
-        f"[OCR] selected pass={best.pass_name} total={perf_counter() - total_started:.2f}s",
+        f"[OCR] selected engine={best.pass_name} "
+        f"score={_quality_key(best)[0]:.4f} "
+        f"total={perf_counter() - total_started:.2f}s",
         flush=True,
     )
     return best
