@@ -1,9 +1,9 @@
-import importlib.util
 import sys
 import types
+from importlib import util
 
 
-if importlib.util.find_spec("paddleocr") is None:
+if util.find_spec("paddleocr") is None:
     paddleocr = types.ModuleType("paddleocr")
 
     class _UnavailablePaddleRuntime:
