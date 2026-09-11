@@ -1,7 +1,6 @@
+from importlib import util
 import sys
 import types
-from importlib import util
-
 
 if util.find_spec("paddleocr") is None:
     paddleocr = types.ModuleType("paddleocr")
