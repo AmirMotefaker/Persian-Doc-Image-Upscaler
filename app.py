@@ -98,7 +98,7 @@ def run_single(image_path, profile, language, progress=gr.Progress()):
         enhanced, _ocr_preview, canonical_text, text_file = process_image(
             str(image_path),
             profile=profile,
-            scale=4.0,
+            scale=2.0,
             language=language,
             output_format="PNG",
             engine="Super-Resolution Pro",
@@ -220,7 +220,7 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                 elem_id="action",
             )
             gr.HTML(
-                "<div class='trust'>OCR فارسی V2 · حفظ جدول · پردازش امن سند</div>"
+                "<div class='trust'>Bina OCR فارسی · حفظ جدول · پردازش امن سند</div>"
             )
 
     sample_button.click(fn=lambda: SAMPLE_IMAGE, outputs=[input_image])
