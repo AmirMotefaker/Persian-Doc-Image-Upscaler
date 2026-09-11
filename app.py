@@ -1,8 +1,5 @@
-from __future__ import annotations
-
-# Gradio callback injection and embedded CSS intentionally use patterns that conflict
-# with generic Ruff style rules but are valid for this UI entrypoint.
 # ruff: noqa: E402, E501, B008
+from __future__ import annotations
 
 import sys
 import tempfile
