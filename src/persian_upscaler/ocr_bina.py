@@ -153,12 +153,7 @@ def _scale_for_tiny_text(image: np.ndarray) -> np.ndarray:
 
 
 def _remove_table_lines(image: np.ndarray) -> tuple[np.ndarray, bool]:
-    """Remove long wired-table borders before text detection.
-
-    Long morphology kernels suppress normal Persian strokes while retaining table
-    rules. Inpainting then removes only those rules, so the detector receives text
-    instead of grid geometry.
-    """
+    """Remove long wired-table borders before text detection."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     binary = cv2.adaptiveThreshold(
         gray,
@@ -181,10 +176,7 @@ def _remove_table_lines(image: np.ndarray) -> tuple[np.ndarray, bool]:
     vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel)
     horizontal_pixels = int(np.count_nonzero(horizontal))
     vertical_pixels = int(np.count_nonzero(vertical))
-    has_grid = (
-        horizontal_pixels > width * 1.4
-        and vertical_pixels > height * 1.4
-    )
+    has_grid = horizontal_pixels > width * 1.4 and vertical_pixels > height * 1.4
     if not has_grid:
         return image, False
 
@@ -366,8 +358,10 @@ def _detect_lines(image: np.ndarray, device: str) -> tuple[list[np.ndarray], lis
         unclip_ratio=1.35,
     ):
         payload = _json_payload(result)
-        polys = payload.get("dt_polys") or []
-        scores = payload.get("dt_scores") or []
+        raw_polys = payload.get("dt_polys")
+        raw_scores = payload.get("dt_scores")
+        polys = [] if raw_polys is None else list(raw_polys)
+        scores = [] if raw_scores is None else list(raw_scores)
         for index, poly in enumerate(polys):
             score = float(scores[index]) if index < len(scores) else 0.0
             box = _bbox_from_poly(poly)
@@ -492,6 +486,11 @@ def recognize(
         else 0.0
     )
     elapsed = perf_counter() - started
+    for index, (row_text, row_score) in enumerate(line_items[:30], start=1):
+        print(
+            f"[OCR] row={index:02d} conf={row_score:.3f} text={row_text[:180]}",
+            flush=True,
+        )
     print(
         f"[OCR] Bina tight-line done boxes={len(boxes)} rows={len(rows)} "
         f"confidence={average:.4f} elapsed={elapsed:.2f}s",
