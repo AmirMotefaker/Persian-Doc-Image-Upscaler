@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .enhancement import build_ocr_candidates, prepare_for_ocr, restore_visual
 from .io import load_image, save_image, save_png
-from .ocr import recognize_best
+from .ocr_bina import recognize_best
 from .super_resolution import super_resolve_visual
 
 
