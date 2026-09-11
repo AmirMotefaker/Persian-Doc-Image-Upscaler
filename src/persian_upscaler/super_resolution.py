@@ -73,12 +73,12 @@ def _normalize_document_luma(image: np.ndarray, weak_scan: bool) -> np.ndarray:
     lightness, channel_a, channel_b = cv2.split(lab)
 
     if weak_scan:
-        denoised = cv2.fastNlMeansDenoising(lightness, None, 4, 7, 19)
-        local = cv2.createCLAHE(clipLimit=1.50, tileGridSize=(8, 8)).apply(denoised)
-        lightness = cv2.addWeighted(denoised, 0.60, local, 0.40, 0)
+        denoised = cv2.fastNlMeansDenoising(lightness, None, 3, 7, 17)
+        local = cv2.createCLAHE(clipLimit=1.42, tileGridSize=(8, 8)).apply(denoised)
+        lightness = cv2.addWeighted(denoised, 0.68, local, 0.32, 0)
     else:
-        local = cv2.createCLAHE(clipLimit=1.18, tileGridSize=(10, 10)).apply(lightness)
-        lightness = cv2.addWeighted(lightness, 0.82, local, 0.18, 0)
+        local = cv2.createCLAHE(clipLimit=1.12, tileGridSize=(10, 10)).apply(lightness)
+        lightness = cv2.addWeighted(lightness, 0.88, local, 0.12, 0)
 
     return cv2.cvtColor(
         cv2.merge((lightness, channel_a, channel_b)),
@@ -91,11 +91,11 @@ def _edge_limited_unsharp(image: np.ndarray, amount: float) -> np.ndarray:
     grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     magnitude = cv2.magnitude(grad_x, grad_y)
-    denom = max(20.0, float(np.percentile(magnitude, 92.0)))
+    denom = max(24.0, float(np.percentile(magnitude, 94.0)))
     mask = np.clip(magnitude / denom, 0.0, 1.0)
-    mask = cv2.GaussianBlur(mask, (0, 0), 1.0)[..., None]
+    mask = cv2.GaussianBlur(mask, (0, 0), 1.1)[..., None]
 
-    blur = cv2.GaussianBlur(image, (0, 0), 0.85)
+    blur = cv2.GaussianBlur(image, (0, 0), 0.78)
     sharpened = cv2.addWeighted(image, 1.0 + amount, blur, -amount, 0)
     mixed = (
         image.astype(np.float32) * (1.0 - mask)
@@ -105,22 +105,21 @@ def _edge_limited_unsharp(image: np.ndarray, amount: float) -> np.ndarray:
 
 
 def _document_restore(image: np.ndarray, scale: int, weak_scan: bool) -> np.ndarray:
-    """Geometry-preserving restoration for Persian text and tables.
+    """Faithful readability restoration for Persian text and tables.
 
-    Learned SR is intentionally avoided on document glyphs. It can invent strokes,
-    halos and dot shapes that make Persian text less readable and reduce OCR fidelity.
+    The document path deliberately avoids learned SR because generated strokes and
+    ringing can change Persian dots, joins, digits, and table rules. 2x is used as
+    the default because 4x only magnifies missing source detail on low-res captures.
     """
     cleaned = _normalize_document_luma(image, weak_scan=weak_scan)
     height, width = cleaned.shape[:2]
     output = cv2.resize(
         cleaned,
         (width * scale, height * scale),
-        interpolation=cv2.INTER_LANCZOS4,
+        interpolation=cv2.INTER_CUBIC,
     )
-
-    # Keep glyph edges intact: only a tiny denoise and edge-gated sharpening.
-    output = cv2.bilateralFilter(output, 3, 8, 8)
-    output = _edge_limited_unsharp(output, amount=0.16 if weak_scan else 0.12)
+    output = cv2.bilateralFilter(output, 3, 7, 7)
+    output = _edge_limited_unsharp(output, amount=0.10 if weak_scan else 0.07)
     return output
 
 
@@ -141,30 +140,35 @@ def _natural_ai_restore(image: np.ndarray) -> np.ndarray:
 
 def super_resolve_visual(
     image: np.ndarray,
-    scale: float = 4.0,
+    scale: float = 2.0,
     profile: str = "سند",
 ) -> np.ndarray:
-    """Fast, conservative output path for Persian documents."""
+    """Fast, fidelity-first output path for Persian documents."""
     started = perf_counter()
     image = _ensure_bgr(image)
     requested = max(1.0, float(scale))
-    native_scale = 4
 
     if profile in DOCUMENT_PROFILES:
+        document_scale = max(1, min(2, round(requested)))
         weak_scan = profile == "اسکن ضعیف"
-        print(f"[SR] engine=DocumentRestore x4 profile={profile}", flush=True)
-        output = _document_restore(image, native_scale, weak_scan=weak_scan)
+        print(
+            f"[SR] engine=DocumentRestore x{document_scale} profile={profile}",
+            flush=True,
+        )
+        output = _document_restore(image, document_scale, weak_scan=weak_scan)
     else:
         output = _natural_ai_restore(image)
-
-    if abs(requested - native_scale) > 0.01:
-        height, width = image.shape[:2]
-        target = (
-            max(1, round(width * requested)),
-            max(1, round(height * requested)),
-        )
-        interpolation = cv2.INTER_LANCZOS4 if requested > native_scale else cv2.INTER_AREA
-        output = cv2.resize(output, target, interpolation=interpolation)
+        native_scale = 4
+        if abs(requested - native_scale) > 0.01:
+            height, width = image.shape[:2]
+            target = (
+                max(1, round(width * requested)),
+                max(1, round(height * requested)),
+            )
+            interpolation = (
+                cv2.INTER_LANCZOS4 if requested > native_scale else cv2.INTER_AREA
+            )
+            output = cv2.resize(output, target, interpolation=interpolation)
 
     print(
         f"[SR] done size={output.shape[1]}x{output.shape[0]} "
