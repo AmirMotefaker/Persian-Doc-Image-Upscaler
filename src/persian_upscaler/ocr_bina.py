@@ -18,14 +18,16 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 from paddleocr import PaddleOCR
 
 BINA_REVISION = "2af6ae7eeb38d195d4d26b13467fccf0e27f37e4"
-BINA_BASE_URL = (
-    "https://huggingface.co/Reza2kn/Bina-0.2-Rizeh/resolve/"
-    f"{BINA_REVISION}/inference"
-)
-BINA_FILES = {
+BINA_BASE_URL = "https://huggingface.co/Reza2kn/Bina-0.2-Rizeh/resolve/" f"{BINA_REVISION}"
+BINA_RECOGNIZER_FILES = {
     "inference.json": "b802ea6f182ffb341716b2f649b8f48a2c1f3e4fb6db26f4cfd31771d80cd8b8",
     "inference.pdiparams": "f8e1b5b4e9ef11b46c521fed7d1c9b7e7b2d08c4c879aa01353acd7308a6e9fb",
     "inference.yml": "650bfd52635c3a5680479df99a4c5cb3b94e2875b25a7bc3aea45ec1bad6a841",
+}
+BINA_DETECTOR_FILES = {
+    "inference.json": "0f1a7ec35da36173529c7a60238b7f7919e3831929c3f700ad90ad4896adecd5",
+    "inference.pdiparams": "85218d2e3d98f5a21c58b4220627be923a97aee5db3cc71f39536ab31ac53960",
+    "inference.yml": "7298d5ead546584af2504d03355f881ac7a7bc0eb1e282d3e159277c1d0af871",
 }
 MAX_OCR_PIXELS = 2_000_000
 MAX_OCR_SIDE = 1800
@@ -50,37 +52,44 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _model_root() -> Path:
+def _runtime_root() -> Path:
     root = Path(
         os.environ.get(
             "DAQIQKHAN_BINA_MODEL_DIR",
-            Path.home() / ".cache" / "daqiqkhan" / "bina-0.2-rizeh" / "inference",
+            Path.home() / ".cache" / "daqiqkhan" / "bina-0.2-rizeh",
         )
     )
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
-def _ensure_bina_model() -> Path:
-    root = _model_root()
-    for filename, expected_sha in BINA_FILES.items():
+def _ensure_component(component: str, files: dict[str, str]) -> Path:
+    root = _runtime_root() / component
+    root.mkdir(parents=True, exist_ok=True)
+    for filename, expected_sha in files.items():
         target = root / filename
         if target.is_file() and _sha256(target) == expected_sha:
             continue
 
         tmp = target.with_suffix(target.suffix + ".download")
         tmp.unlink(missing_ok=True)
-        print(f"[OCR] Bina download start file={filename}", flush=True)
+        print(f"[OCR] Bina download start component={component} file={filename}", flush=True)
         urllib.request.urlretrieve(
-            f"{BINA_BASE_URL}/{filename}?download=true",
+            f"{BINA_BASE_URL}/{component}/{filename}?download=true",
             tmp,
         )
         if not tmp.is_file() or _sha256(tmp) != expected_sha:
             tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"Bina model checksum failed: {filename}")
+            raise RuntimeError(f"Bina model checksum failed: {component}/{filename}")
         tmp.replace(target)
-        print(f"[OCR] Bina model ready file={filename}", flush=True)
+        print(f"[OCR] Bina model ready component={component} file={filename}", flush=True)
     return root
+
+
+def _ensure_bina_runtime() -> tuple[Path, Path]:
+    recognizer = _ensure_component("inference", BINA_RECOGNIZER_FILES)
+    detector = _ensure_component("detector", BINA_DETECTOR_FILES)
+    return recognizer, detector
 
 
 def _pred_reverse(text: str) -> str:
@@ -204,14 +213,17 @@ def _render_layout(
     return "\n".join(rendered), tuple(line_items)
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=1)
 def get_bina_ocr(device: str = "cpu") -> PaddleOCR:
-    model_dir = _ensure_bina_model()
-    print(f"[OCR] engine=Bina-0.2-Rizeh detector=PP-OCRv5-mobile device={device}", flush=True)
+    recognizer_dir, detector_dir = _ensure_bina_runtime()
+    print(
+        f"[OCR] engine=Bina-0.2-Rizeh detector=PP-OCRv6-medium device={device}",
+        flush=True,
+    )
     return PaddleOCR(
         device=device,
-        text_detection_model_name="PP-OCRv5_mobile_det",
-        text_recognition_model_dir=str(model_dir),
+        text_detection_model_dir=str(detector_dir),
+        text_recognition_model_dir=str(recognizer_dir),
         enable_mkldnn=False,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
@@ -248,11 +260,7 @@ def recognize(
             layout_parts.append(layout_text)
         all_lines.extend(lines)
 
-    average = (
-        sum(score for _, score in all_lines) / len(all_lines)
-        if all_lines
-        else 0.0
-    )
+    average = sum(score for _, score in all_lines) / len(all_lines) if all_lines else 0.0
     layout_text = "\n".join(layout_parts).strip()
     elapsed = perf_counter() - started
     print(
@@ -270,12 +278,6 @@ def recognize(
     )
 
 
-def _quality_key(result: OCRResult) -> tuple[float, int, int]:
-    useful_chars = sum(1 for char in result.layout_text if not char.isspace())
-    confident_lines = sum(1 for _, score in result.lines if score >= 0.55)
-    return (round(result.average_confidence, 5), confident_lines, useful_chars)
-
-
 def recognize_best(
     candidates: list[tuple[str, np.ndarray]],
     device: str = "cpu",
@@ -284,18 +286,11 @@ def recognize_best(
         raise ValueError("هیچ ورودی OCR برای ارزیابی وجود ندارد.")
 
     total_started = perf_counter()
-    first_name, first_image = candidates[0]
-    first = recognize(first_image, device=device, pass_name=first_name)
-    results = [first]
-
-    if len(candidates) > 1 and (first.average_confidence < 0.62 or len(first.lines) < 4):
-        second_name, second_image = candidates[1]
-        print("[OCR] Bina fallback pass enabled", flush=True)
-        results.append(recognize(second_image, device=device, pass_name=second_name))
-
-    best = max(results, key=_quality_key)
+    pass_name, image = candidates[0]
+    result = recognize(image, device=device, pass_name=pass_name)
     print(
-        f"[OCR] selected engine={best.pass_name} total={perf_counter() - total_started:.2f}s",
+        f"[OCR] selected engine={result.pass_name} single-pass=true "
+        f"total={perf_counter() - total_started:.2f}s",
         flush=True,
     )
-    return best
+    return result
