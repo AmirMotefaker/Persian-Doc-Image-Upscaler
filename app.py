@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -108,6 +109,7 @@ def run_single(image_path, profile, language, progress=gr.Progress()):
         progress(1.0, desc="انجام شد")
         return comparison, canonical_text, enhanced, text_file
     except Exception as exc:
+        traceback.print_exc()
         prefix = "Processing failed" if language == "en" else "پردازش ناموفق بود"
         raise gr.Error(f"{prefix}: {exc}") from exc
 
@@ -220,7 +222,7 @@ with gr.Blocks(title="دقیق‌خوان | DaqiqKhan") as demo:
                 elem_id="action",
             )
             gr.HTML(
-                "<div class='trust'>Bina OCR فارسی · حفظ جدول · پردازش امن سند</div>"
+                "<div class='trust'>OCR فارسی V2 · حفظ جدول · پردازش امن سند</div>"
             )
 
     sample_button.click(fn=lambda: SAMPLE_IMAGE, outputs=[input_image])
