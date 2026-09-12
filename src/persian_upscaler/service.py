@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import tempfile
+import traceback
 import zipfile
 from pathlib import Path
 
 from .enhancement import build_ocr_candidates, prepare_for_ocr, restore_visual
 from .io import load_image, save_image, save_png
-from .ocr_bina import recognize_best
+from .ocr import recognize_best as recognize_best_legacy
+from .ocr_bina import recognize_best as recognize_best_bina
 from .super_resolution import super_resolve_visual
 
 
@@ -18,6 +20,20 @@ def _stage(name_fa: str, name_en: str, language: str, fn):
         if language == "en":
             raise RuntimeError(f"{name_en} failed: {exc}") from exc
         raise RuntimeError(f"مرحله «{name_fa}» ناموفق بود: {exc}") from exc
+
+
+def _recognize_with_fallback(candidates):
+    try:
+        result = recognize_best_bina(candidates)
+        if result.layout_text.strip() or result.text.strip():
+            return result
+        raise RuntimeError("Bina OCR returned no usable text")
+    except Exception as exc:
+        print(f"[OCR] Bina tight-line failed; fallback=legacy reason={exc}", flush=True)
+        traceback.print_exc()
+        result = recognize_best_legacy(candidates)
+        print(f"[OCR] fallback selected engine={result.pass_name}", flush=True)
+        return result
 
 
 def process_image(
@@ -35,7 +51,6 @@ def process_image(
         lambda: load_image(file_path),
     )
 
-    # OCR has an independent conservative path. It never reads generated SR pixels.
     ocr_restored = _stage(
         "بهبود امن متن برای OCR",
         "Text-safe OCR enhancement",
@@ -50,8 +65,8 @@ def process_image(
 
     if engine == "Super-Resolution Pro":
         visual = _stage(
-            "Super-Resolution تصویر",
-            "Visual super-resolution",
+            "بهبود تصویر",
+            "Visual enhancement",
             language,
             lambda: super_resolve_visual(
                 image,
@@ -88,7 +103,7 @@ def process_image(
         "تشخیص متن فارسی",
         "Persian text recognition",
         language,
-        lambda: recognize_best(candidates),
+        lambda: _recognize_with_fallback(candidates),
     )
 
     canonical_text = result.layout_text.strip() or result.text.strip()
@@ -109,7 +124,6 @@ def process_image(
     text_path = workdir / "ocr.txt"
     json_path = workdir / "ocr.json"
 
-    # The downloadable text is byte-for-byte the same canonical content shown in UI.
     text_path.write_text(canonical_text, encoding="utf-8")
     json_path.write_text(
         json.dumps(
