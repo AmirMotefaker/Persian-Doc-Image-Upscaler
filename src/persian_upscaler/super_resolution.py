@@ -19,12 +19,12 @@ ESPCN_URL = (
 )
 ESPCN_NAME = "ESPCN_x4.pb"
 DOCUMENT_PROFILES = {"سند", "اسکن ضعیف"}
-REalesrgan_URL = (
-    "https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases/download/"
-    "v0.2.0/realesrgan-ncnn-vulkan-v0.2.0-windows.zip"
+REALESRGAN_URL = (
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/"
+    "v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip"
 )
-REalesrgan_SHA256 = "1bbbdb12d470af80b035c773682e144c6c2f6ece9210832a289af0a48ce3fa9a"
-REalesrgan_DIR = "realesrgan-ncnn-vulkan-v0.2.0-windows"
+REALESRGAN_SHA256 = "abc02804e17982a3be33675e4d471e91ea374e65b70167abc09e31acb412802d"
+REALESRGAN_ARCHIVE = "realesrgan-ncnn-vulkan-20220424-windows.zip"
 
 
 def _model_root() -> Path:
@@ -72,25 +72,37 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _find_realesrgan_bundle(root: Path) -> tuple[Path, Path] | None:
+    executables = list(root.rglob("realesrgan-ncnn-vulkan.exe"))
+    params = list(root.rglob("realesrgan-x4plus.param"))
+    for exe in executables:
+        for param in params:
+            model_dir = param.parent
+            model_bin = model_dir / "realesrgan-x4plus.bin"
+            if model_bin.is_file():
+                return exe, model_dir
+    return None
+
+
 @lru_cache(maxsize=1)
-def _ensure_realesrgan() -> Path:
+def _ensure_realesrgan() -> tuple[Path, Path]:
     if os.name != "nt":
         raise RuntimeError("Real-ESRGAN NCNN visual engine is currently configured for Windows.")
 
-    root = _model_root() / "realesrgan-ncnn"
-    exe = root / REalesrgan_DIR / "realesrgan-ncnn-vulkan.exe"
-    if exe.is_file():
-        return exe
+    root = _model_root() / "realesrgan-ncnn-v0250"
+    existing = _find_realesrgan_bundle(root)
+    if existing is not None:
+        return existing
 
     root.mkdir(parents=True, exist_ok=True)
-    archive = root / "realesrgan-ncnn-vulkan-v0.2.0-windows.zip"
-    if not archive.is_file() or _sha256(archive) != REalesrgan_SHA256:
+    archive = root / REALESRGAN_ARCHIVE
+    if not archive.is_file() or _sha256(archive) != REALESRGAN_SHA256:
         archive.unlink(missing_ok=True)
         tmp = archive.with_suffix(".download")
         tmp.unlink(missing_ok=True)
-        print("[SR] downloading Real-ESRGAN NCNN/Vulkan visual engine...", flush=True)
-        urllib.request.urlretrieve(REalesrgan_URL, tmp)
-        if _sha256(tmp) != REalesrgan_SHA256:
+        print("[SR] downloading official Real-ESRGAN portable bundle...", flush=True)
+        urllib.request.urlretrieve(REALESRGAN_URL, tmp)
+        if _sha256(tmp) != REALESRGAN_SHA256:
             tmp.unlink(missing_ok=True)
             raise RuntimeError("هش فایل رسمی Real-ESRGAN معتبر نیست.")
         tmp.replace(archive)
@@ -98,9 +110,10 @@ def _ensure_realesrgan() -> Path:
     with zipfile.ZipFile(archive) as bundle:
         bundle.extractall(root)
 
-    if not exe.is_file():
-        raise RuntimeError("فایل اجرایی Real-ESRGAN پس از استخراج پیدا نشد.")
-    return exe
+    found = _find_realesrgan_bundle(root)
+    if found is None:
+        raise RuntimeError("Real-ESRGAN executable/model bundle پس از استخراج کامل نیست.")
+    return found
 
 
 def _ensure_bgr(image: np.ndarray) -> np.ndarray:
@@ -164,7 +177,7 @@ def _document_restore(image: np.ndarray, scale: int, weak_scan: bool) -> np.ndar
 
 
 def _realesrgan_restore(image: np.ndarray, requested_scale: float) -> np.ndarray:
-    exe = _ensure_realesrgan()
+    exe, model_dir = _ensure_realesrgan()
     with tempfile.TemporaryDirectory(prefix="daqiqkhan-sr-") as workdir:
         input_path = Path(workdir) / "input.png"
         output_path = Path(workdir) / "output.png"
@@ -177,6 +190,8 @@ def _realesrgan_restore(image: np.ndarray, requested_scale: float) -> np.ndarray
             str(input_path),
             "-o",
             str(output_path),
+            "-m",
+            str(model_dir),
             "-n",
             "realesrgan-x4plus",
             "-s",
