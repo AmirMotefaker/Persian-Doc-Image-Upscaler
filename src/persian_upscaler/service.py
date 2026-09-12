@@ -36,6 +36,11 @@ def _recognize_with_fallback(candidates):
         return result
 
 
+def recognize_best(candidates):
+    """Stable service seam kept for tests and alternate OCR backends."""
+    return _recognize_with_fallback(candidates)
+
+
 def process_image(
     file_path: str,
     profile: str,
@@ -103,7 +108,7 @@ def process_image(
         "تشخیص متن فارسی",
         "Persian text recognition",
         language,
-        lambda: _recognize_with_fallback(candidates),
+        lambda: recognize_best(candidates),
     )
 
     canonical_text = result.layout_text.strip() or result.text.strip()
