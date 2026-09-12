@@ -80,11 +80,15 @@ def _canonical_text(result: Any) -> str:
     return ""
 
 
-def _vl_engine() -> str:
-    configured = os.environ.get("DAQIQKHAN_VL_ENGINE")
+def _vl_backend() -> str:
+    configured = os.environ.get("DAQIQKHAN_VL_BACKEND")
     if configured:
         return configured.strip().lower()
-    return "transformers" if os.name == "nt" else "paddle"
+    return "llama-cpp-server" if os.name == "nt" else "native"
+
+
+def _vl_server_url() -> str:
+    return os.environ.get("DAQIQKHAN_VL_SERVER_URL", "http://127.0.0.1:8118/v1").rstrip("/")
 
 
 @lru_cache(maxsize=2)
@@ -96,16 +100,15 @@ def _pipeline(use_layout_detection: bool):
             "PaddleOCR-VL dependencies are missing. Install paddleocr[doc-parser]==3.7.0."
         ) from exc
 
-    engine = _vl_engine()
+    backend = _vl_backend()
     print(
         "[OCR] engine=PaddleOCR-VL-1.6 "
-        f"layout_detection={use_layout_detection} backend={engine}",
+        f"layout_detection={use_layout_detection} vl_backend={backend}",
         flush=True,
     )
 
     kwargs: dict[str, Any] = {
         "pipeline_version": "v1.6",
-        "engine": engine,
         "use_doc_orientation_classify": False,
         "use_doc_unwarping": False,
         "use_layout_detection": use_layout_detection,
@@ -115,8 +118,9 @@ def _pipeline(use_layout_detection: bool):
         "merge_layout_blocks": True,
         "use_queues": False,
     }
-    if engine == "transformers":
-        kwargs["device"] = "cpu"
+    if backend != "native":
+        kwargs["vl_rec_backend"] = backend
+        kwargs["vl_rec_server_url"] = _vl_server_url()
 
     return PaddleOCRVL(**kwargs)
 
@@ -157,7 +161,7 @@ def recognize_document(
         text=canonical,
         average_confidence=0.0,
         lines=lines,
-        pass_name=f"paddleocr-vl-1.6:{_vl_engine()}",
+        pass_name=f"paddleocr-vl-1.6:{_vl_backend()}",
         elapsed_seconds=elapsed,
         layout_text=canonical,
     )
