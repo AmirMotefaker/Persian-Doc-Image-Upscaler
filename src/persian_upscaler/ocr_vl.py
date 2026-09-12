@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from time import perf_counter
 from typing import Any
@@ -79,6 +80,13 @@ def _canonical_text(result: Any) -> str:
     return ""
 
 
+def _vl_engine() -> str:
+    configured = os.environ.get("DAQIQKHAN_VL_ENGINE")
+    if configured:
+        return configured.strip().lower()
+    return "transformers" if os.name == "nt" else "paddle"
+
+
 @lru_cache(maxsize=2)
 def _pipeline(use_layout_detection: bool):
     try:
@@ -88,21 +96,29 @@ def _pipeline(use_layout_detection: bool):
             "PaddleOCR-VL dependencies are missing. Install paddleocr[doc-parser]==3.7.0."
         ) from exc
 
+    engine = _vl_engine()
     print(
         "[OCR] engine=PaddleOCR-VL-1.6 "
-        f"layout_detection={use_layout_detection} backend=native",
+        f"layout_detection={use_layout_detection} backend={engine}",
         flush=True,
     )
-    return PaddleOCRVL(
-        pipeline_version="v1.6",
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_layout_detection=use_layout_detection,
-        use_chart_recognition=False,
-        use_seal_recognition=False,
-        format_block_content=True,
-        merge_layout_blocks=True,
-    )
+
+    kwargs: dict[str, Any] = {
+        "pipeline_version": "v1.6",
+        "engine": engine,
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_layout_detection": use_layout_detection,
+        "use_chart_recognition": False,
+        "use_seal_recognition": False,
+        "format_block_content": True,
+        "merge_layout_blocks": True,
+        "use_queues": False,
+    }
+    if engine == "transformers":
+        kwargs["device"] = "cpu"
+
+    return PaddleOCRVL(**kwargs)
 
 
 def recognize_document(
@@ -141,7 +157,7 @@ def recognize_document(
         text=canonical,
         average_confidence=0.0,
         lines=lines,
-        pass_name="paddleocr-vl-1.6",
+        pass_name=f"paddleocr-vl-1.6:{_vl_engine()}",
         elapsed_seconds=elapsed,
         layout_text=canonical,
     )
