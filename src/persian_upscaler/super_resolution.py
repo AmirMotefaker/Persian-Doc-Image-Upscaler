@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import subprocess
+import tempfile
 import urllib.request
+import zipfile
 from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
@@ -15,6 +19,12 @@ ESPCN_URL = (
 )
 ESPCN_NAME = "ESPCN_x4.pb"
 DOCUMENT_PROFILES = {"سند", "اسکن ضعیف"}
+REalesrgan_URL = (
+    "https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases/download/"
+    "v0.2.0/realesrgan-ncnn-vulkan-v0.2.0-windows.zip"
+)
+REalesrgan_SHA256 = "1bbbdb12d470af80b035c773682e144c6c2f6ece9210832a289af0a48ce3fa9a"
+REalesrgan_DIR = "realesrgan-ncnn-vulkan-v0.2.0-windows"
 
 
 def _model_root() -> Path:
@@ -52,6 +62,45 @@ def _engine():
     sr.readModel(str(_ensure_model()))
     sr.setModel("espcn", 4)
     return sr
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=1)
+def _ensure_realesrgan() -> Path:
+    if os.name != "nt":
+        raise RuntimeError("Real-ESRGAN NCNN visual engine is currently configured for Windows.")
+
+    root = _model_root() / "realesrgan-ncnn"
+    exe = root / REalesrgan_DIR / "realesrgan-ncnn-vulkan.exe"
+    if exe.is_file():
+        return exe
+
+    root.mkdir(parents=True, exist_ok=True)
+    archive = root / "realesrgan-ncnn-vulkan-v0.2.0-windows.zip"
+    if not archive.is_file() or _sha256(archive) != REalesrgan_SHA256:
+        archive.unlink(missing_ok=True)
+        tmp = archive.with_suffix(".download")
+        tmp.unlink(missing_ok=True)
+        print("[SR] downloading Real-ESRGAN NCNN/Vulkan visual engine...", flush=True)
+        urllib.request.urlretrieve(REalesrgan_URL, tmp)
+        if _sha256(tmp) != REalesrgan_SHA256:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError("هش فایل رسمی Real-ESRGAN معتبر نیست.")
+        tmp.replace(archive)
+
+    with zipfile.ZipFile(archive) as bundle:
+        bundle.extractall(root)
+
+    if not exe.is_file():
+        raise RuntimeError("فایل اجرایی Real-ESRGAN پس از استخراج پیدا نشد.")
+    return exe
 
 
 def _ensure_bgr(image: np.ndarray) -> np.ndarray:
@@ -104,12 +153,6 @@ def _edge_limited_unsharp(image: np.ndarray, amount: float) -> np.ndarray:
 
 
 def _document_restore(image: np.ndarray, scale: int, weak_scan: bool) -> np.ndarray:
-    """Fidelity-first enlargement for Persian documents.
-
-    No denoising is applied after enlargement: on tiny Persian glyphs that removes
-    real stroke information. The path uses mild luminance normalization, Lanczos
-    enlargement and edge-gated sharpening only.
-    """
     cleaned = _normalize_document_luma(image, weak_scan=weak_scan)
     height, width = cleaned.shape[:2]
     output = cv2.resize(
@@ -118,6 +161,52 @@ def _document_restore(image: np.ndarray, scale: int, weak_scan: bool) -> np.ndar
         interpolation=cv2.INTER_LANCZOS4,
     )
     return _edge_limited_unsharp(output, amount=0.20 if weak_scan else 0.16)
+
+
+def _realesrgan_restore(image: np.ndarray, requested_scale: float) -> np.ndarray:
+    exe = _ensure_realesrgan()
+    with tempfile.TemporaryDirectory(prefix="daqiqkhan-sr-") as workdir:
+        input_path = Path(workdir) / "input.png"
+        output_path = Path(workdir) / "output.png"
+        if not cv2.imwrite(str(input_path), image):
+            raise RuntimeError("ذخیره ورودی موقت Real-ESRGAN ناموفق بود.")
+
+        command = [
+            str(exe),
+            "-i",
+            str(input_path),
+            "-o",
+            str(output_path),
+            "-n",
+            "realesrgan-x4plus",
+            "-s",
+            "4",
+            "-f",
+            "png",
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=str(exe.parent),
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        if completed.returncode != 0 or not output_path.is_file():
+            detail = (completed.stderr or completed.stdout or "unknown failure").strip()
+            raise RuntimeError(f"Real-ESRGAN NCNN failed: {detail}")
+
+        output = cv2.imread(str(output_path), cv2.IMREAD_COLOR)
+        if output is None:
+            raise RuntimeError("خروجی Real-ESRGAN قابل خواندن نیست.")
+
+    target_scale = max(1.0, float(requested_scale))
+    if abs(target_scale - 4.0) > 0.01:
+        height, width = image.shape[:2]
+        target = (round(width * target_scale), round(height * target_scale))
+        interpolation = cv2.INTER_AREA if target_scale < 4.0 else cv2.INTER_LANCZOS4
+        output = cv2.resize(output, target, interpolation=interpolation)
+    return output
 
 
 def _natural_ai_restore(image: np.ndarray) -> np.ndarray:
@@ -144,13 +233,22 @@ def super_resolve_visual(
     requested = max(1.0, float(scale))
 
     if profile in DOCUMENT_PROFILES:
-        document_scale = max(1, min(2, round(requested)))
-        weak_scan = profile == "اسکن ضعیف"
-        print(
-            f"[SR] engine=DocumentRestoreSharp x{document_scale} profile={profile}",
-            flush=True,
-        )
-        output = _document_restore(image, document_scale, weak_scan=weak_scan)
+        try:
+            print(
+                f"[SR] engine=RealESRGAN-NCNN visual-only scale={requested:g} "
+                f"profile={profile}",
+                flush=True,
+            )
+            output = _realesrgan_restore(image, requested)
+        except Exception as exc:
+            document_scale = max(1, min(2, round(requested)))
+            weak_scan = profile == "اسکن ضعیف"
+            print(
+                f"[SR] RealESRGAN unavailable; fallback=DocumentRestoreSharp "
+                f"reason={exc}",
+                flush=True,
+            )
+            output = _document_restore(image, document_scale, weak_scan=weak_scan)
     else:
         output = _natural_ai_restore(image)
         native_scale = 4
