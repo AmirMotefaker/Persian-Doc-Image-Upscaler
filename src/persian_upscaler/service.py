@@ -10,6 +10,7 @@ from .enhancement import build_ocr_candidates, prepare_for_ocr, restore_visual
 from .io import load_image, save_image, save_png
 from .ocr import recognize_best as recognize_best_legacy
 from .ocr_bina import recognize_best as recognize_best_bina
+from .ocr_vl import recognize_document as recognize_document_vl
 from .super_resolution import super_resolve_visual
 
 
@@ -29,7 +30,7 @@ def _recognize_with_fallback(candidates):
             return result
         raise RuntimeError("Bina OCR returned no usable text")
     except Exception as exc:
-        print(f"[OCR] Bina tight-line failed; fallback=legacy reason={exc}", flush=True)
+        print(f"[OCR] Bina failed; fallback=legacy reason={exc}", flush=True)
         traceback.print_exc()
         result = recognize_best_legacy(candidates)
         print(f"[OCR] fallback selected engine={result.pass_name}", flush=True)
@@ -39,6 +40,22 @@ def _recognize_with_fallback(candidates):
 def recognize_best(candidates):
     """Stable service seam kept for tests and alternate OCR backends."""
     return _recognize_with_fallback(candidates)
+
+
+def _recognize_document(image, candidates, profile):
+    try:
+        result = recognize_document_vl(image, profile=profile)
+        if result.layout_text.strip() or result.text.strip():
+            print("[OCR] primary selected engine=paddleocr-vl-1.6", flush=True)
+            return result
+        raise RuntimeError("PaddleOCR-VL-1.6 returned no usable text")
+    except Exception as exc:
+        print(
+            f"[OCR] PaddleOCR-VL-1.6 unavailable/failed; fallback=Bina reason={exc}",
+            flush=True,
+        )
+        traceback.print_exc()
+        return recognize_best(candidates)
 
 
 def process_image(
@@ -108,7 +125,7 @@ def process_image(
         "تشخیص متن فارسی",
         "Persian text recognition",
         language,
-        lambda: recognize_best(candidates),
+        lambda: _recognize_document(ocr_restored, candidates, profile),
     )
 
     canonical_text = result.layout_text.strip() or result.text.strip()
