@@ -18,7 +18,7 @@ ESPCN_URL = (
     "master/models/ESPCN_x4.pb"
 )
 ESPCN_NAME = "ESPCN_x4.pb"
-DOCUMENT_PROFILES = {"سند", "اسکن ضعیف"}
+TEXT_PROFILES = {"سند", "اسکرین‌شات", "اسکن ضعیف"}
 REALESRGAN_URL = (
     "https://github.com/xinntao/Real-ESRGAN/releases/download/"
     "v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip"
@@ -131,15 +131,16 @@ def _ensure_bgr(image: np.ndarray) -> np.ndarray:
 
 
 def _normalize_document_luma(image: np.ndarray, weak_scan: bool) -> np.ndarray:
+    """Apply conservative local contrast without inventing stroke detail."""
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     lightness, channel_a, channel_b = cv2.split(lab)
 
     if weak_scan:
-        local = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(8, 8)).apply(lightness)
-        lightness = cv2.addWeighted(lightness, 0.74, local, 0.26, 0)
+        local = cv2.createCLAHE(clipLimit=1.25, tileGridSize=(8, 8)).apply(lightness)
+        lightness = cv2.addWeighted(lightness, 0.82, local, 0.18, 0)
     else:
-        local = cv2.createCLAHE(clipLimit=1.10, tileGridSize=(10, 10)).apply(lightness)
-        lightness = cv2.addWeighted(lightness, 0.91, local, 0.09, 0)
+        local = cv2.createCLAHE(clipLimit=1.08, tileGridSize=(10, 10)).apply(lightness)
+        lightness = cv2.addWeighted(lightness, 0.94, local, 0.06, 0)
 
     return cv2.cvtColor(
         cv2.merge((lightness, channel_a, channel_b)),
@@ -148,15 +149,16 @@ def _normalize_document_luma(image: np.ndarray, weak_scan: bool) -> np.ndarray:
 
 
 def _edge_limited_unsharp(image: np.ndarray, amount: float) -> np.ndarray:
+    """Sharpen only existing edges; never synthesize missing character strokes."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     magnitude = cv2.magnitude(grad_x, grad_y)
-    threshold = max(18.0, float(np.percentile(magnitude, 82.0)))
-    mask = np.clip((magnitude - threshold * 0.35) / threshold, 0.0, 1.0)
-    mask = cv2.GaussianBlur(mask, (0, 0), 0.65)[..., None]
+    threshold = max(20.0, float(np.percentile(magnitude, 84.0)))
+    mask = np.clip((magnitude - threshold * 0.45) / threshold, 0.0, 1.0)
+    mask = cv2.GaussianBlur(mask, (0, 0), 0.72)[..., None]
 
-    blur = cv2.GaussianBlur(image, (0, 0), 0.52)
+    blur = cv2.GaussianBlur(image, (0, 0), 0.58)
     sharpened = cv2.addWeighted(image, 1.0 + amount, blur, -amount, 0)
     mixed = (
         image.astype(np.float32) * (1.0 - mask)
@@ -166,6 +168,13 @@ def _edge_limited_unsharp(image: np.ndarray, amount: float) -> np.ndarray:
 
 
 def _document_restore(image: np.ndarray, scale: int, weak_scan: bool) -> np.ndarray:
+    """Glyph-preserving Persian document enlargement.
+
+    This path is deliberately non-generative. Generic photographic SR models can
+    alter Persian letters and digits, which is unacceptable for documents,
+    screenshots, tables and scans. We only normalize luminance, enlarge with a
+    deterministic resampler and sharpen edges already present in the source.
+    """
     cleaned = _normalize_document_luma(image, weak_scan=weak_scan)
     height, width = cleaned.shape[:2]
     output = cv2.resize(
@@ -173,10 +182,11 @@ def _document_restore(image: np.ndarray, scale: int, weak_scan: bool) -> np.ndar
         (width * scale, height * scale),
         interpolation=cv2.INTER_LANCZOS4,
     )
-    return _edge_limited_unsharp(output, amount=0.20 if weak_scan else 0.16)
+    return _edge_limited_unsharp(output, amount=0.16 if weak_scan else 0.12)
 
 
 def _realesrgan_restore(image: np.ndarray, requested_scale: float) -> np.ndarray:
+    """Photographic restoration only. Never call this for text-bearing profiles."""
     exe, model_dir = _ensure_realesrgan()
     with tempfile.TemporaryDirectory(prefix="daqiqkhan-sr-") as workdir:
         input_path = Path(workdir) / "input.png"
@@ -224,18 +234,34 @@ def _realesrgan_restore(image: np.ndarray, requested_scale: float) -> np.ndarray
     return output
 
 
-def _natural_ai_restore(image: np.ndarray) -> np.ndarray:
+def _natural_ai_restore(image: np.ndarray, requested_scale: float) -> np.ndarray:
     try:
-        print("[SR] engine=ESPCN x4 profile=natural", flush=True)
-        return _engine().upsample(image)
-    except Exception as exc:
-        print(f"[SR] ESPCN unavailable; fallback=Lanczos reason={exc}", flush=True)
-        height, width = image.shape[:2]
-        return cv2.resize(
-            image,
-            (width * 4, height * 4),
-            interpolation=cv2.INTER_LANCZOS4,
+        print(
+            f"[SR] engine=RealESRGAN-NCNN profile=natural scale={requested_scale:g}",
+            flush=True,
         )
+        return _realesrgan_restore(image, requested_scale)
+    except Exception as exc:
+        print(f"[SR] RealESRGAN unavailable; fallback=ESPCN reason={exc}", flush=True)
+        try:
+            output = _engine().upsample(image)
+        except Exception as second_exc:
+            print(f"[SR] ESPCN unavailable; fallback=Lanczos reason={second_exc}", flush=True)
+            height, width = image.shape[:2]
+            output = cv2.resize(
+                image,
+                (width * 4, height * 4),
+                interpolation=cv2.INTER_LANCZOS4,
+            )
+
+        if abs(requested_scale - 4.0) > 0.01:
+            height, width = image.shape[:2]
+            output = cv2.resize(
+                output,
+                (round(width * requested_scale), round(height * requested_scale)),
+                interpolation=cv2.INTER_AREA if requested_scale < 4.0 else cv2.INTER_LANCZOS4,
+            )
+        return output
 
 
 def super_resolve_visual(
@@ -247,36 +273,17 @@ def super_resolve_visual(
     image = _ensure_bgr(image)
     requested = max(1.0, float(scale))
 
-    if profile in DOCUMENT_PROFILES:
-        try:
-            print(
-                f"[SR] engine=RealESRGAN-NCNN visual-only scale={requested:g} "
-                f"profile={profile}",
-                flush=True,
-            )
-            output = _realesrgan_restore(image, requested)
-        except Exception as exc:
-            document_scale = max(1, min(2, round(requested)))
-            weak_scan = profile == "اسکن ضعیف"
-            print(
-                f"[SR] RealESRGAN unavailable; fallback=DocumentRestoreSharp "
-                f"reason={exc}",
-                flush=True,
-            )
-            output = _document_restore(image, document_scale, weak_scan=weak_scan)
+    if profile in TEXT_PROFILES:
+        document_scale = max(1, min(2, round(requested)))
+        weak_scan = profile == "اسکن ضعیف"
+        print(
+            f"[SR] engine=PersianGlyphSafe x{document_scale} profile={profile} "
+            "generative=false",
+            flush=True,
+        )
+        output = _document_restore(image, document_scale, weak_scan=weak_scan)
     else:
-        output = _natural_ai_restore(image)
-        native_scale = 4
-        if abs(requested - native_scale) > 0.01:
-            height, width = image.shape[:2]
-            target = (
-                max(1, round(width * requested)),
-                max(1, round(height * requested)),
-            )
-            interpolation = (
-                cv2.INTER_LANCZOS4 if requested > native_scale else cv2.INTER_AREA
-            )
-            output = cv2.resize(output, target, interpolation=interpolation)
+        output = _natural_ai_restore(image, requested)
 
     print(
         f"[SR] done size={output.shape[1]}x{output.shape[0]} "
