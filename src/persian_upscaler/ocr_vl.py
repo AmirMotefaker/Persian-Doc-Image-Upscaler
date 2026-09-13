@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import urllib.request
 from functools import lru_cache
@@ -142,19 +143,38 @@ def _vl_server_url() -> str:
     return os.environ.get("DAQIQKHAN_VL_SERVER_URL", "http://127.0.0.1:8118/v1").rstrip("/")
 
 
-def _require_vl_server() -> None:
+@lru_cache(maxsize=1)
+def _vl_api_model_name() -> str:
     backend = _vl_backend()
     if backend == "native":
-        return
+        return ""
+
     url = _vl_server_url() + "/models"
     try:
-        with urllib.request.urlopen(url, timeout=3) as response:
+        with urllib.request.urlopen(url, timeout=5) as response:
             if response.status != 200:
                 raise RuntimeError(f"HTTP {response.status}")
+            payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
         raise RuntimeError(
             "PaddleOCR-VL server is not ready. Start the local llama.cpp VLM service first."
         ) from exc
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("PaddleOCR-VL server returned no model id")
+
+    model_id = str(data[0].get("id") or "").strip()
+    if not model_id:
+        raise RuntimeError("PaddleOCR-VL server model id is empty")
+
+    print(f"[OCR] VL server model={model_id}", flush=True)
+    return model_id
+
+
+def _require_vl_server() -> None:
+    if _vl_backend() != "native":
+        _vl_api_model_name()
 
 
 def _prepare_vl_image(image: np.ndarray) -> np.ndarray:
@@ -212,6 +232,8 @@ def _pipeline(use_layout_detection: bool):
     if backend != "native":
         kwargs["vl_rec_backend"] = backend
         kwargs["vl_rec_server_url"] = _vl_server_url()
+        kwargs["vl_rec_api_model_name"] = _vl_api_model_name()
+        kwargs["vl_rec_max_concurrency"] = 1
 
     return PaddleOCRVL(**kwargs)
 
