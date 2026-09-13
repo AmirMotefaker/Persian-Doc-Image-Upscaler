@@ -131,16 +131,14 @@ def _ensure_bgr(image: np.ndarray) -> np.ndarray:
 
 
 def _normalize_document_luma(image: np.ndarray, weak_scan: bool) -> np.ndarray:
-    """Apply conservative local contrast without inventing stroke detail."""
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     lightness, channel_a, channel_b = cv2.split(lab)
 
-    if weak_scan:
-        local = cv2.createCLAHE(clipLimit=1.25, tileGridSize=(8, 8)).apply(lightness)
-        lightness = cv2.addWeighted(lightness, 0.82, local, 0.18, 0)
-    else:
-        local = cv2.createCLAHE(clipLimit=1.08, tileGridSize=(10, 10)).apply(lightness)
-        lightness = cv2.addWeighted(lightness, 0.94, local, 0.06, 0)
+    clip = 1.52 if weak_scan else 1.28
+    tile = (8, 8) if weak_scan else (10, 10)
+    local = cv2.createCLAHE(clipLimit=clip, tileGridSize=tile).apply(lightness)
+    blend = 0.34 if weak_scan else 0.24
+    lightness = cv2.addWeighted(lightness, 1.0 - blend, local, blend, 0)
 
     return cv2.cvtColor(
         cv2.merge((lightness, channel_a, channel_b)),
@@ -148,17 +146,42 @@ def _normalize_document_luma(image: np.ndarray, weak_scan: bool) -> np.ndarray:
     )
 
 
+def _guided_detail_luma(lightness: np.ndarray, weak_scan: bool) -> np.ndarray:
+    source = lightness.astype(np.float32) / 255.0
+    try:
+        guided = cv2.ximgproc.guidedFilter(
+            guide=source,
+            src=source,
+            radius=3 if weak_scan else 2,
+            eps=0.0025 if weak_scan else 0.0016,
+        )
+    except Exception:
+        guided = cv2.GaussianBlur(source, (0, 0), 1.15 if weak_scan else 0.9)
+
+    detail = source - guided
+    gain = 1.05 if weak_scan else 0.88
+    restored = np.clip(source + detail * gain, 0.0, 1.0)
+    return np.round(restored * 255.0).astype(np.uint8)
+
+
+def _dark_stroke_boost(lightness: np.ndarray, weak_scan: bool) -> np.ndarray:
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    blackhat = cv2.morphologyEx(lightness, cv2.MORPH_BLACKHAT, kernel)
+    amount = 0.24 if weak_scan else 0.18
+    boosted = lightness.astype(np.float32) - blackhat.astype(np.float32) * amount
+    return np.clip(boosted, 0, 255).astype(np.uint8)
+
+
 def _edge_limited_unsharp(image: np.ndarray, amount: float) -> np.ndarray:
-    """Sharpen only existing edges; never synthesize missing character strokes."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     magnitude = cv2.magnitude(grad_x, grad_y)
-    threshold = max(20.0, float(np.percentile(magnitude, 84.0)))
-    mask = np.clip((magnitude - threshold * 0.45) / threshold, 0.0, 1.0)
-    mask = cv2.GaussianBlur(mask, (0, 0), 0.72)[..., None]
+    threshold = max(15.0, float(np.percentile(magnitude, 76.0)))
+    mask = np.clip((magnitude - threshold * 0.28) / max(threshold, 1.0), 0.0, 1.0)
+    mask = cv2.GaussianBlur(mask, (0, 0), 0.55)[..., None]
 
-    blur = cv2.GaussianBlur(image, (0, 0), 0.58)
+    blur = cv2.GaussianBlur(image, (0, 0), 0.48)
     sharpened = cv2.addWeighted(image, 1.0 + amount, blur, -amount, 0)
     mixed = (
         image.astype(np.float32) * (1.0 - mask)
@@ -168,21 +191,30 @@ def _edge_limited_unsharp(image: np.ndarray, amount: float) -> np.ndarray:
 
 
 def _document_restore(image: np.ndarray, scale: int, weak_scan: bool) -> np.ndarray:
-    """Glyph-preserving Persian document enlargement.
+    """High-contrast, non-generative Persian document restoration.
 
-    This path is deliberately non-generative. Generic photographic SR models can
-    alter Persian letters and digits, which is unacceptable for documents,
-    screenshots, tables and scans. We only normalize luminance, enlarge with a
-    deterministic resampler and sharpen edges already present in the source.
+    The pipeline strengthens only information already present in the source:
+    luminance normalization, guided high-frequency recovery, dark-stroke boost,
+    deterministic enlargement and edge-gated sharpening. It never calls a
+    generative SR model for text-bearing images.
     """
-    cleaned = _normalize_document_luma(image, weak_scan=weak_scan)
-    height, width = cleaned.shape[:2]
+    normalized = _normalize_document_luma(image, weak_scan=weak_scan)
+    lab = cv2.cvtColor(normalized, cv2.COLOR_BGR2LAB)
+    lightness, channel_a, channel_b = cv2.split(lab)
+    lightness = _guided_detail_luma(lightness, weak_scan=weak_scan)
+    lightness = _dark_stroke_boost(lightness, weak_scan=weak_scan)
+    restored = cv2.cvtColor(
+        cv2.merge((lightness, channel_a, channel_b)),
+        cv2.COLOR_LAB2BGR,
+    )
+
+    height, width = restored.shape[:2]
     output = cv2.resize(
-        cleaned,
+        restored,
         (width * scale, height * scale),
         interpolation=cv2.INTER_LANCZOS4,
     )
-    return _edge_limited_unsharp(output, amount=0.16 if weak_scan else 0.12)
+    return _edge_limited_unsharp(output, amount=0.52 if weak_scan else 0.42)
 
 
 def _realesrgan_restore(image: np.ndarray, requested_scale: float) -> np.ndarray:
@@ -277,7 +309,7 @@ def super_resolve_visual(
         document_scale = max(1, min(2, round(requested)))
         weak_scan = profile == "اسکن ضعیف"
         print(
-            f"[SR] engine=PersianGlyphSafe x{document_scale} profile={profile} "
+            f"[SR] engine=PersianDocumentHD x{document_scale} profile={profile} "
             "generative=false",
             flush=True,
         )
