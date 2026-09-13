@@ -13,6 +13,8 @@ from .ocr_bina import recognize_best as recognize_best_bina
 from .ocr_vl import recognize_document as recognize_document_vl
 from .super_resolution import super_resolve_visual
 
+TEXT_PROFILES = {"سند", "اسکرین‌شات", "اسکن ضعیف"}
+
 
 def _stage(name_fa: str, name_en: str, language: str, fn):
     try:
@@ -46,15 +48,20 @@ def _recognize_document(image, candidates, profile):
     try:
         result = recognize_document_vl(image, profile=profile)
         if result.layout_text.strip() or result.text.strip():
-            print("[OCR] primary selected engine=paddleocr-vl-1.6", flush=True)
+            print(
+                f"[OCR] primary selected engine={result.pass_name}",
+                flush=True,
+            )
             return result
         raise RuntimeError("PaddleOCR-VL-1.6 returned no usable text")
     except Exception as exc:
-        print(
-            f"[OCR] PaddleOCR-VL-1.6 unavailable/failed; fallback=Bina reason={exc}",
-            flush=True,
-        )
+        print(f"[OCR] PaddleOCR-VL-1.6 failed reason={exc}", flush=True)
         traceback.print_exc()
+        if profile in TEXT_PROFILES:
+            raise RuntimeError(
+                "OCR تخصصی فارسی آماده نیست؛ برای جلوگیری از نمایش متن اشتباه، "
+                "fallback ضعیف غیرفعال شده است. سرویس PaddleOCR-VL را بررسی کنید."
+            ) from exc
         return recognize_best(candidates)
 
 
@@ -125,7 +132,8 @@ def process_image(
         "تشخیص متن فارسی",
         "Persian text recognition",
         language,
-        lambda: _recognize_document(ocr_restored, candidates, profile),
+        # VL gets the untouched source. Classical fallback candidates remain separate.
+        lambda: _recognize_document(image, candidates, profile),
     )
 
     canonical_text = result.layout_text.strip() or result.text.strip()
