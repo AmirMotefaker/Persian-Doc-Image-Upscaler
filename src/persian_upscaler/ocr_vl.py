@@ -1,13 +1,61 @@
 from __future__ import annotations
 
 import os
+import urllib.request
 from functools import lru_cache
+from html.parser import HTMLParser
 from time import perf_counter
 from typing import Any
 
+import cv2
 import numpy as np
 
 from .ocr import OCRResult
+
+
+class _TableTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag == "tr":
+            self._row = []
+        elif tag in {"td", "th"} and self._row is not None:
+            self._cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            cleaned = " ".join(data.split())
+            if cleaned:
+                self._cell.append(cleaned)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"td", "th"} and self._row is not None and self._cell is not None:
+            value = " ".join(self._cell).strip()
+            self._row.append(value)
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            if any(cell for cell in self._row):
+                self.rows.append(self._row)
+            self._row = None
+            self._cell = None
+
+
+def _html_table_to_tsv(value: str) -> str:
+    if "<table" not in value.lower():
+        return ""
+    parser = _TableTextParser()
+    try:
+        parser.feed(value)
+    except Exception:
+        return ""
+    lines = ["\t".join(cell for cell in row if cell) for row in parser.rows]
+    return "\n".join(line for line in lines if line.strip())
 
 
 def _result_json(result: Any) -> dict[str, Any]:
@@ -57,15 +105,12 @@ def _block_content(block: dict[str, Any]) -> str:
     for key in ("block_content", "blockContent", "content", "text"):
         value = block.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            table_text = _html_table_to_tsv(value)
+            return table_text or value.strip()
     return ""
 
 
 def _canonical_text(result: Any) -> str:
-    markdown = _result_markdown(result)
-    if markdown:
-        return markdown
-
     payload = _result_json(result)
     blocks = _find_parsing_blocks(payload)
     parts = [_block_content(block) for block in blocks]
@@ -73,10 +118,16 @@ def _canonical_text(result: Any) -> str:
     if parts:
         return "\n\n".join(parts)
 
+    markdown = _result_markdown(result)
+    if markdown:
+        table_text = _html_table_to_tsv(markdown)
+        return table_text or markdown
+
     for key in ("text", "content", "markdown"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            table_text = _html_table_to_tsv(value)
+            return table_text or value.strip()
     return ""
 
 
@@ -91,6 +142,45 @@ def _vl_server_url() -> str:
     return os.environ.get("DAQIQKHAN_VL_SERVER_URL", "http://127.0.0.1:8118/v1").rstrip("/")
 
 
+def _require_vl_server() -> None:
+    backend = _vl_backend()
+    if backend == "native":
+        return
+    url = _vl_server_url() + "/models"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as response:
+            if response.status != 200:
+                raise RuntimeError(f"HTTP {response.status}")
+    except Exception as exc:
+        raise RuntimeError(
+            "PaddleOCR-VL server is not ready. Start the local llama.cpp VLM service first."
+        ) from exc
+
+
+def _prepare_vl_image(image: np.ndarray) -> np.ndarray:
+    if image is None or image.size == 0:
+        raise ValueError("تصویر OCR معتبر نیست.")
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif image.ndim == 3 and image.shape[2] == 4:
+        image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    elif image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("ساختار تصویر OCR-VL پشتیبانی نمی‌شود.")
+
+    height, width = image.shape[:2]
+    long_side = max(height, width)
+    if long_side >= 1100:
+        return image.copy()
+
+    scale = min(3.0, 1100.0 / max(1, long_side))
+    target = (max(1, round(width * scale)), max(1, round(height * scale)))
+    print(
+        f"[OCR] VL deterministic upscale {width}x{height} -> {target[0]}x{target[1]}",
+        flush=True,
+    )
+    return cv2.resize(image, target, interpolation=cv2.INTER_CUBIC)
+
+
 @lru_cache(maxsize=2)
 def _pipeline(use_layout_detection: bool):
     try:
@@ -101,6 +191,7 @@ def _pipeline(use_layout_detection: bool):
         ) from exc
 
     backend = _vl_backend()
+    _require_vl_server()
     print(
         "[OCR] engine=PaddleOCR-VL-1.6 "
         f"layout_detection={use_layout_detection} vl_backend={backend}",
@@ -129,18 +220,16 @@ def recognize_document(
     image: np.ndarray,
     profile: str = "سند",
 ) -> OCRResult:
-    if image is None or image.size == 0:
-        raise ValueError("تصویر OCR معتبر نیست.")
-
-    use_layout_detection = profile in {"سند", "اسکن ضعیف"}
+    prepared = _prepare_vl_image(image)
+    use_layout_detection = profile in {"سند", "اسکرین‌شات", "اسکن ضعیف"}
     started = perf_counter()
     print(
         f"[OCR] PaddleOCR-VL-1.6 start profile={profile} "
-        f"layout={use_layout_detection} size={image.shape[1]}x{image.shape[0]}",
+        f"layout={use_layout_detection} size={prepared.shape[1]}x{prepared.shape[0]}",
         flush=True,
     )
 
-    outputs = _pipeline(use_layout_detection).predict(image)
+    outputs = _pipeline(use_layout_detection).predict(prepared)
     texts: list[str] = []
     for result in outputs:
         text = _canonical_text(result)
