@@ -17,8 +17,8 @@ from PIL import Image
 from persian_upscaler.service import process_image
 
 PROFILE_CHOICES = {
-    "fa": [("سند", "سند"), ("اسکرین‌شات", "طبیعی"), ("اسکن ضعیف", "اسکن ضعیف")],
-    "en": [("Document", "سند"), ("Screenshot", "طبیعی"), ("Weak scan", "اسکن ضعیف")],
+    "fa": [("سند", "سند"), ("اسکرین‌شات", "اسکرین‌شات"), ("اسکن ضعیف", "اسکن ضعیف")],
+    "en": [("Document", "سند"), ("Screenshot", "اسکرین‌شات"), ("Weak scan", "اسکن ضعیف")],
 }
 
 TEXT = {
