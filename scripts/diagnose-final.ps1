@@ -37,10 +37,6 @@ if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
 $input = $dialog.FileName
 Write-Host "Selected: $input" -ForegroundColor Green
 
-if (-not (Test-Path $input)) {
-    throw "فایل انتخاب‌شده وجود ندارد: $input"
-}
-
 Write-Host "`n=== 2. ENSURE VL SERVER ===" -ForegroundColor Cyan
 if (-not (Test-VlServer)) {
     Write-Host "VL server is down. Starting full local stack in a separate PowerShell..." -ForegroundColor Yellow
@@ -71,7 +67,7 @@ $env:PYTHONIOENCODING = "utf-8"
 $env:DAQIQKHAN_VL_BACKEND = "llama-cpp-server"
 $env:DAQIQKHAN_VL_SERVER_URL = "http://127.0.0.1:$port/v1"
 
-Write-Host "`n=== 3. RUN END-TO-END DIAGNOSTIC ===" -ForegroundColor Green
+Write-Host "`n=== 3. RUN RELEASE-CANDIDATE DIAGNOSTIC ===" -ForegroundColor Green
 
 @'
 import json
@@ -95,7 +91,6 @@ for child in list(out_dir.iterdir()):
         shutil.rmtree(child)
 
 sys.path.insert(0, str(root))
-
 from src.persian_upscaler.service import process_image
 
 
@@ -121,6 +116,18 @@ def mean_abs_diff(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs(a.astype(np.float32) - b.astype(np.float32))))
 
 
+def normalize_text(text: str) -> str:
+    table = str.maketrans({
+        "ي": "ی", "ى": "ی", "ك": "ک", "ة": "ه", "ۀ": "ه",
+        "أ": "ا", "إ": "ا", "ٱ": "ا",
+    })
+    return " ".join(text.translate(table).replace("\t", " ").split())
+
+
+def compact(text: str) -> str:
+    return normalize_text(text).replace(" ", "")
+
+
 def text_stats(text: str) -> dict:
     return {
         "length": len(text.strip()),
@@ -132,22 +139,54 @@ def text_stats(text: str) -> dict:
     }
 
 
+def fixture_token_recall(text: str, width: int, height: int):
+    if (width, height) != (335, 224):
+        return None
+
+    expected = [
+        "آخرین قیمت",
+        "بالاترین قیمت",
+        "پایین ترین قیمت",
+        "اولین قیمت",
+        "قیمت پایانی",
+        "حجم معاملات",
+        "ساعت آخرین معامله",
+        "آستانه بالا",
+        "آستانه پایین",
+        "27,000,000",
+        "27,768,000",
+        "26,670,130",
+        "26,779,180",
+        "27,135,086",
+        "55,918",
+        "1,517,559,720",
+        "28,905,560",
+        "23,650,010",
+    ]
+    haystack = compact(text)
+    found = [token for token in expected if compact(token) in haystack]
+    missing = [token for token in expected if compact(token) not in haystack]
+    return {
+        "expected": len(expected),
+        "found": len(found),
+        "recall": round(len(found) / len(expected), 4),
+        "found_tokens": found,
+        "missing_tokens": missing,
+    }
+
+
 source = read_image(input_path)
-source_sharp = sharpness(source)
-source_contrast = contrast(source)
+source_h, source_w = source.shape[:2]
 
 print("\n=== INPUT ===")
 print(input_path)
-print(
-    f"Source: {source.shape[1]}x{source.shape[0]} "
-    f"sharpness={source_sharp:.3f} contrast={source_contrast:.3f}"
-)
+print(f"Source: {source_w}x{source_h}")
 
 print("\n=== PRODUCT PIPELINE ===")
 enhanced_path, ocr_preview_path, text, text_path = process_image(
     str(input_path),
     profile="سند",
-    scale=2.0,
+    scale=4.0,
     language="fa",
     output_format="PNG",
     engine="Super-Resolution Pro",
@@ -164,21 +203,30 @@ bicubic = cv2.resize(
     interpolation=cv2.INTER_CUBIC,
 )
 
+source_sharp = sharpness(source)
+bicubic_sharp = sharpness(bicubic)
 output_sharp = sharpness(enhanced)
+source_contrast = contrast(source)
 output_contrast = contrast(enhanced)
+
+ocr_stats = text_stats(text)
+fixture = fixture_token_recall(text, source_w, source_h)
 
 report = {
     "input": str(input_path),
-    "source_size": [int(source.shape[1]), int(source.shape[0])],
+    "source_size": [source_w, source_h],
     "output_size": [int(enhanced.shape[1]), int(enhanced.shape[0])],
+    "scale": round(enhanced.shape[1] / source_w, 2),
     "source_sharpness": round(source_sharp, 4),
+    "bicubic_same_scale_sharpness": round(bicubic_sharp, 4),
     "output_sharpness": round(output_sharp, 4),
-    "sharpness_gain": round(output_sharp / max(source_sharp, 1e-6), 4),
+    "sharpness_vs_bicubic": round(output_sharp / max(bicubic_sharp, 1e-6), 4),
     "source_contrast": round(source_contrast, 4),
     "output_contrast": round(output_contrast, 4),
     "contrast_gain": round(output_contrast / max(source_contrast, 1e-6), 4),
     "mad_vs_plain_bicubic": round(mean_abs_diff(enhanced, bicubic), 4),
-    "ocr": text_stats(text),
+    "ocr": ocr_stats,
+    "fixture_token_recall": fixture,
     "ocr_first_30_lines": text.splitlines()[:30],
 }
 
@@ -186,45 +234,50 @@ shutil.copy2(input_path, out_dir / ("01-original" + input_path.suffix.lower()))
 shutil.copy2(enhanced_path, out_dir / "02-enhanced.png")
 shutil.copy2(ocr_preview_path, out_dir / "03-ocr-input.png")
 shutil.copy2(text_path, out_dir / "04-ocr.txt")
-
 (out_dir / "report.json").write_text(
     json.dumps(report, ensure_ascii=False, indent=2),
     encoding="utf-8",
 )
 
 failures = []
-if report["output_size"][0] <= report["source_size"][0]:
-    failures.append("output resolution did not increase")
-if report["sharpness_gain"] < 1.15:
-    failures.append(f"visual sharpness improvement is weak: {report['sharpness_gain']}")
+if report["scale"] < 3.9:
+    failures.append(f"document output is not true 4x: {report['scale']}x")
+if report["sharpness_vs_bicubic"] < 1.50:
+    failures.append(
+        f"same-scale sharpness gain is weak: {report['sharpness_vs_bicubic']}x vs bicubic"
+    )
 if report["mad_vs_plain_bicubic"] < 3.0:
     failures.append(
         f"enhanced image is too close to ordinary resize: {report['mad_vs_plain_bicubic']}"
     )
-if report["ocr"]["length"] < 40:
-    failures.append("OCR text is incomplete")
-if report["ocr"]["persian_chars"] < 20:
-    failures.append(f"too few Persian characters: {report['ocr']['persian_chars']}")
-if report["ocr"]["non_empty_lines"] < 5:
-    failures.append("document structure was not recovered")
+if ocr_stats["persian_chars"] < 20 or ocr_stats["non_empty_lines"] < 5:
+    failures.append("Persian OCR/layout is incomplete")
+if fixture and fixture["recall"] < 0.85:
+    failures.append(
+        f"acceptance fixture OCR token recall is too low: {fixture['recall']:.1%}"
+    )
 
 print("\n=== FINAL REPORT ===")
 print(json.dumps(report, ensure_ascii=False, indent=2))
 
 summary = [
-    "DAQIQKHAN FINAL DIAGNOSTIC",
+    "DAQIQKHAN RELEASE-CANDIDATE DIAGNOSTIC",
     "",
     f"Input: {report['source_size']}",
-    f"Output: {report['output_size']}",
-    f"Sharpness gain: {report['sharpness_gain']}",
-    f"Contrast gain: {report['contrast_gain']}",
+    f"Output: {report['output_size']} ({report['scale']}x)",
+    f"Sharpness vs same-scale Bicubic: {report['sharpness_vs_bicubic']}x",
     f"MAD vs Bicubic: {report['mad_vs_plain_bicubic']}",
-    f"Persian chars: {report['ocr']['persian_chars']}",
-    f"Latin chars: {report['ocr']['latin_chars']}",
-    f"Digits: {report['ocr']['digits']}",
-    f"Lines: {report['ocr']['non_empty_lines']}",
-    f"Table separators: {report['ocr']['tabs']}",
+    f"Persian chars: {ocr_stats['persian_chars']}",
+    f"Digits: {ocr_stats['digits']}",
+    f"Lines: {ocr_stats['non_empty_lines']}",
+    f"Table separators: {ocr_stats['tabs']}",
 ]
+
+if fixture:
+    summary += [
+        f"Fixture token recall: {fixture['found']}/{fixture['expected']} ({fixture['recall']:.1%})",
+        "Missing fixture tokens: " + ", ".join(fixture["missing_tokens"]),
+    ]
 
 if failures:
     summary += ["", "RESULT: FAIL"]
