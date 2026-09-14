@@ -177,16 +177,20 @@ def _require_vl_server() -> None:
         _vl_api_model_name()
 
 
-def _prepare_vl_image(image: np.ndarray) -> np.ndarray:
+def _ensure_bgr(image: np.ndarray) -> np.ndarray:
     if image is None or image.size == 0:
         raise ValueError("تصویر OCR معتبر نیست.")
     if image.ndim == 2:
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    elif image.ndim == 3 and image.shape[2] == 4:
-        image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-    elif image.ndim != 3 or image.shape[2] != 3:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.ndim == 3 and image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("ساختار تصویر OCR-VL پشتیبانی نمی‌شود.")
+    return image
 
+
+def _prepare_vl_image(image: np.ndarray) -> np.ndarray:
+    image = _ensure_bgr(image)
     height, width = image.shape[:2]
     long_side = max(height, width)
     if long_side >= 1100:
@@ -201,7 +205,101 @@ def _prepare_vl_image(image: np.ndarray) -> np.ndarray:
     return cv2.resize(image, target, interpolation=cv2.INTER_CUBIC)
 
 
-@lru_cache(maxsize=2)
+def _prepare_table_vl_image(image: np.ndarray) -> np.ndarray:
+    image = _ensure_bgr(image)
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    lightness, channel_a, channel_b = cv2.split(lab)
+    blur = cv2.GaussianBlur(lightness, (0, 0), 0.65)
+    lightness = cv2.addWeighted(lightness, 2.15, blur, -1.15, 0)
+    local = cv2.createCLAHE(clipLimit=1.35, tileGridSize=(8, 8)).apply(lightness)
+    lightness = cv2.addWeighted(lightness, 0.85, local, 0.15, 0)
+    detailed = cv2.cvtColor(
+        cv2.merge((lightness, channel_a, channel_b)),
+        cv2.COLOR_LAB2BGR,
+    )
+
+    height, width = detailed.shape[:2]
+    long_side = max(height, width)
+    scale = min(4.0, max(1.0, 1350.0 / max(1, long_side)))
+    target = (max(1, round(width * scale)), max(1, round(height * scale)))
+    print(
+        f"[OCR] VL table reread upscale {width}x{height} -> {target[0]}x{target[1]}",
+        flush=True,
+    )
+    return cv2.resize(detailed, target, interpolation=cv2.INTER_LANCZOS4)
+
+
+def _looks_like_table(image: np.ndarray) -> bool:
+    image = _ensure_bgr(image)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    binary = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY_INV,
+        21,
+        10,
+    )
+    height, width = gray.shape
+    horizontal = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (max(12, width // 12), 1)),
+    )
+    vertical = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(8, height // 12))),
+    )
+    ratio = (
+        np.count_nonzero(horizontal) + np.count_nonzero(vertical)
+    ) / max(1, height * width)
+    print(f"[OCR] table-line-ratio={ratio:.4f}", flush=True)
+    return ratio >= 0.025
+
+
+def _normalize_persian_text(text: str) -> str:
+    translation = str.maketrans(
+        {
+            "ي": "ی",
+            "ى": "ی",
+            "ك": "ک",
+            "ۀ": "ه",
+            "ة": "ه",
+            "أ": "ا",
+            "إ": "ا",
+            "ٱ": "ا",
+        }
+    )
+    lines = []
+    for line in text.translate(translation).splitlines():
+        cells = [" ".join(cell.split()) for cell in line.split("\t")]
+        cleaned = "\t".join(cell for cell in cells if cell)
+        if cleaned.strip():
+            lines.append(cleaned)
+    return "\n".join(lines)
+
+
+def _quality_score(text: str) -> float:
+    if not text.strip():
+        return float("-inf")
+    persian = sum("\u0600" <= ch <= "\u06ff" for ch in text)
+    digits = sum(ch.isdigit() for ch in text)
+    tabs = text.count("\t")
+    lines = len([line for line in text.splitlines() if line.strip()])
+    latin = sum(("a" <= ch.lower() <= "z") for ch in text)
+    replacements = text.count("�")
+    return (
+        min(persian, 300) * 0.035
+        + min(digits, 250) * 0.020
+        + min(tabs, 50) * 1.50
+        + min(lines, 30) * 0.60
+        - latin * 0.025
+        - replacements * 5.0
+    )
+
+
+@lru_cache(maxsize=4)
 def _pipeline(use_layout_detection: bool):
     try:
         from paddleocr import PaddleOCRVL
@@ -238,11 +336,21 @@ def _pipeline(use_layout_detection: bool):
     return PaddleOCRVL(**kwargs)
 
 
+def _extract_outputs(outputs: list[Any]) -> str:
+    texts: list[str] = []
+    for result in outputs:
+        text = _canonical_text(result)
+        if text:
+            texts.append(text)
+    return _normalize_persian_text("\n\n".join(texts).strip())
+
+
 def recognize_document(
     image: np.ndarray,
     profile: str = "سند",
 ) -> OCRResult:
-    prepared = _prepare_vl_image(image)
+    source = _ensure_bgr(image)
+    prepared = _prepare_vl_image(source)
     use_layout_detection = profile in {"سند", "اسکرین‌شات", "اسکن ضعیف"}
     started = perf_counter()
     print(
@@ -251,28 +359,47 @@ def recognize_document(
         flush=True,
     )
 
-    outputs = _pipeline(use_layout_detection).predict(prepared)
-    texts: list[str] = []
-    for result in outputs:
-        text = _canonical_text(result)
-        if text:
-            texts.append(text)
+    primary = _extract_outputs(_pipeline(use_layout_detection).predict(prepared))
+    if not primary:
+        raise RuntimeError("PaddleOCR-VL-1.6 returned no usable Persian document text")
 
-    canonical = "\n\n".join(texts).strip()
+    canonical = primary
+    selected_mode = "layout"
+    primary_score = _quality_score(primary)
+    print(f"[OCR] VL candidate mode=layout score={primary_score:.2f}", flush=True)
+
+    if use_layout_detection and max(source.shape[:2]) < 900 and _looks_like_table(source):
+        table_view = _prepare_table_vl_image(source)
+        try:
+            table_text = _extract_outputs(
+                _pipeline(False).predict(table_view, prompt_label="table")
+            )
+        except Exception as exc:
+            print(f"[OCR] VL table reread skipped reason={exc}", flush=True)
+            table_text = ""
+
+        if table_text:
+            table_score = _quality_score(table_text)
+            print(f"[OCR] VL candidate mode=table score={table_score:.2f}", flush=True)
+            if table_score >= primary_score:
+                canonical = table_text
+                selected_mode = "table"
+
     if not canonical:
         raise RuntimeError("PaddleOCR-VL-1.6 returned no usable Persian document text")
 
     lines = tuple((line, 0.0) for line in canonical.splitlines() if line.strip())
     elapsed = perf_counter() - started
     print(
-        f"[OCR] PaddleOCR-VL-1.6 done lines={len(lines)} elapsed={elapsed:.2f}s",
+        f"[OCR] PaddleOCR-VL-1.6 done mode={selected_mode} "
+        f"lines={len(lines)} elapsed={elapsed:.2f}s",
         flush=True,
     )
     return OCRResult(
         text=canonical,
         average_confidence=0.0,
         lines=lines,
-        pass_name=f"paddleocr-vl-1.6:{_vl_backend()}",
+        pass_name=f"paddleocr-vl-1.6:{_vl_backend()}:{selected_mode}",
         elapsed_seconds=elapsed,
         layout_text=canonical,
     )
