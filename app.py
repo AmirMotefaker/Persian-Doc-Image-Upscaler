@@ -99,7 +99,7 @@ def run_single(image_path, profile, language, progress=gr.Progress()):
         enhanced, _ocr_preview, canonical_text, text_file = process_image(
             str(image_path),
             profile=profile,
-            scale=2.0,
+            scale=4.0,
             language=language,
             output_format="PNG",
             engine="Super-Resolution Pro",
