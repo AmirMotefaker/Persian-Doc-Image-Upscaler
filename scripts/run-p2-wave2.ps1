@@ -45,26 +45,34 @@ $exe = Get-ChildItem -Path $cache -Recurse -Filter "realesrgan-ncnn-vulkan.exe" 
     Select-Object -First 1
 
 if ($null -eq $exe) {
-    Write-Host "Official Windows binary not cached. Resolving latest Real-ESRGAN release..." -ForegroundColor Yellow
+    Write-Host "Official Windows binary not cached. Resolving official Real-ESRGAN ncnn-vulkan release..." -ForegroundColor Yellow
     $headers = @{ "User-Agent" = "DaqiqKhan-P2-Benchmark" }
+    $releaseApi = "https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
     $release = Invoke-RestMethod `
-        -Uri "https://api.github.com/repos/xinntao/Real-ESRGAN/releases/latest" `
+        -Uri $releaseApi `
         -Headers $headers `
         -TimeoutSec 30
 
+    Write-Host "Official ncnn-vulkan release: $($release.tag_name)" -ForegroundColor Yellow
+
     $asset = $release.assets |
         Where-Object {
-            $_.name -match '(?i)realesrgan.*ncnn.*vulkan.*windows.*\.zip$' -or
-            $_.name -match '(?i)windows.*\.zip$'
+            $_.name -match '(?i)^realesrgan[-_].*ncnn.*vulkan.*windows.*\.zip$' -or
+            $_.name -match '(?i)^realesrgan-ncnn-vulkan-.*-windows\.zip$'
         } |
         Select-Object -First 1
 
     if ($null -eq $asset) {
-        throw "STOP: no official Windows Real-ESRGAN NCNN/Vulkan ZIP found in latest release."
+        $available = @($release.assets | ForEach-Object { $_.name })
+        if ($available.Count -gt 0) {
+            Write-Host "Available official assets:" -ForegroundColor Yellow
+            $available | ForEach-Object { Write-Host " - $_" -ForegroundColor DarkYellow }
+        }
+        throw "STOP: no official Windows Real-ESRGAN ncnn-vulkan ZIP found in official ncnn-vulkan release."
     }
 
     $zip = Join-Path $cache $asset.name
-    Write-Host "Downloading: $($asset.name)" -ForegroundColor Yellow
+    Write-Host "Downloading official asset: $($asset.name)" -ForegroundColor Yellow
     Invoke-WebRequest `
         -Uri $asset.browser_download_url `
         -Headers $headers `
