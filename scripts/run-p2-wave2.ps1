@@ -38,68 +38,86 @@ if (-not (Test-Path "C:\Market\گواهی سپرده مس کاتد.png")) {
     throw "STOP: acceptance fixture is missing."
 }
 
-Write-Host "`n=== ENSURE OFFICIAL REAL-ESRGAN NCNN/VULKAN TOOL ===" -ForegroundColor Cyan
+Write-Host "`n=== ENSURE OFFICIAL REAL-ESRGAN PORTABLE PACKAGE ===" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
 
-$exe = Get-ChildItem -Path $cache -Recurse -Filter "realesrgan-ncnn-vulkan.exe" -File -ErrorAction SilentlyContinue |
-    Select-Object -First 1
+$headers = @{ "User-Agent" = "DaqiqKhan-P2-Benchmark" }
+$portableTag = "v0.2.5.0"
+$portableAssetName = "realesrgan-ncnn-vulkan-20220424-windows.zip"
+$portableReleaseApi = "https://api.github.com/repos/xinntao/Real-ESRGAN/releases/tags/$portableTag"
+
+function Find-CompletePortablePackage {
+    return Get-ChildItem -Path $cache -Recurse -Filter "realesrgan-ncnn-vulkan.exe" -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            $candidateModelDir = Join-Path $_.Directory.FullName "models"
+            (Test-Path (Join-Path $candidateModelDir "realesrgan-x4plus.param")) -and
+            (Test-Path (Join-Path $candidateModelDir "realesrgan-x4plus.bin"))
+        } |
+        Select-Object -First 1
+}
+
+$exe = Find-CompletePortablePackage
 
 if ($null -eq $exe) {
-    Write-Host "Official Windows binary not cached. Resolving official Real-ESRGAN ncnn-vulkan release..." -ForegroundColor Yellow
-    $headers = @{ "User-Agent" = "DaqiqKhan-P2-Benchmark" }
-    $releaseApi = "https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
+    Write-Host "Complete portable package is not cached. Resolving official $portableTag assets..." -ForegroundColor Yellow
+
     $release = Invoke-RestMethod `
-        -Uri $releaseApi `
+        -Uri $portableReleaseApi `
         -Headers $headers `
         -TimeoutSec 30
 
-    Write-Host "Official ncnn-vulkan release: $($release.tag_name)" -ForegroundColor Yellow
-
     $asset = $release.assets |
-        Where-Object {
-            $_.name -match '(?i)^realesrgan[-_].*ncnn.*vulkan.*windows.*\.zip$' -or
-            $_.name -match '(?i)^realesrgan-ncnn-vulkan-.*-windows\.zip$'
-        } |
+        Where-Object { $_.name -eq $portableAssetName } |
         Select-Object -First 1
 
     if ($null -eq $asset) {
-        $available = @($release.assets | ForEach-Object { $_.name })
-        if ($available.Count -gt 0) {
-            Write-Host "Available official assets:" -ForegroundColor Yellow
-            $available | ForEach-Object { Write-Host " - $_" -ForegroundColor DarkYellow }
-        }
-        throw "STOP: no official Windows Real-ESRGAN ncnn-vulkan ZIP found in official ncnn-vulkan release."
+        Write-Host "Official assets returned for $portableTag:" -ForegroundColor Yellow
+        @($release.assets | ForEach-Object { $_.name }) |
+            ForEach-Object { Write-Host " - $_" -ForegroundColor DarkYellow }
+        throw "STOP: official model-complete Windows portable asset was not found."
     }
 
     $zip = Join-Path $cache $asset.name
-    Write-Host "Downloading official asset: $($asset.name)" -ForegroundColor Yellow
-    Invoke-WebRequest `
-        -Uri $asset.browser_download_url `
-        -Headers $headers `
-        -OutFile $zip `
-        -TimeoutSec 300
 
-    $extract = Join-Path $cache "tool"
+    if (-not (Test-Path $zip) -or (Get-Item $zip).Length -lt 10MB) {
+        Write-Host "Downloading official model-complete asset: $($asset.name)" -ForegroundColor Yellow
+        Invoke-WebRequest `
+            -Uri $asset.browser_download_url `
+            -Headers $headers `
+            -OutFile $zip `
+            -TimeoutSec 600
+    }
+    else {
+        Write-Host "Reusing cached official archive: $zip" -ForegroundColor Yellow
+    }
+
+    $extract = Join-Path $cache "portable-v0.2.5.0"
     if (Test-Path $extract) {
         Remove-Item -Recurse -Force $extract
     }
     Expand-Archive -Path $zip -DestinationPath $extract -Force
 
-    $exe = Get-ChildItem -Path $extract -Recurse -Filter "realesrgan-ncnn-vulkan.exe" -File |
+    $exe = Get-ChildItem -Path $extract -Recurse -Filter "realesrgan-ncnn-vulkan.exe" -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
 }
 
 if ($null -eq $exe) {
-    throw "STOP: realesrgan-ncnn-vulkan.exe was not found after bootstrap."
+    throw "STOP: realesrgan-ncnn-vulkan.exe was not found in the official portable package."
 }
 
 $modelDir = Join-Path $exe.Directory.FullName "models"
-if (-not (Test-Path (Join-Path $modelDir "realesrgan-x4plus.param"))) {
-    throw "STOP: realesrgan-x4plus.param missing from official tool package."
+$paramPath = Join-Path $modelDir "realesrgan-x4plus.param"
+$binPath = Join-Path $modelDir "realesrgan-x4plus.bin"
+
+if (-not (Test-Path $paramPath)) {
+    throw "STOP: realesrgan-x4plus.param missing after extracting official $portableTag portable package."
 }
-if (-not (Test-Path (Join-Path $modelDir "realesrgan-x4plus.bin"))) {
-    throw "STOP: realesrgan-x4plus.bin missing from official tool package."
+if (-not (Test-Path $binPath)) {
+    throw "STOP: realesrgan-x4plus.bin missing after extracting official $portableTag portable package."
 }
+
+Write-Host "Official portable release: $portableTag" -ForegroundColor Green
+Write-Host "Model files: $paramPath ; $binPath" -ForegroundColor Green
 
 Write-Host "Real-ESRGAN: $($exe.FullName)" -ForegroundColor Green
 Write-Host "Model dir: $modelDir" -ForegroundColor Green
