@@ -71,7 +71,7 @@ if ($null -eq $exe) {
         Select-Object -First 1
 
     if ($null -eq $asset) {
-        Write-Host "Official assets returned for $portableTag:" -ForegroundColor Yellow
+        Write-Host "Official assets returned for ${portableTag}:" -ForegroundColor Yellow
         @($release.assets | ForEach-Object { $_.name }) |
             ForEach-Object { Write-Host " - $_" -ForegroundColor DarkYellow }
         throw "STOP: official model-complete Windows portable asset was not found."
